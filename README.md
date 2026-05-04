@@ -2,6 +2,20 @@
 
 ## Contexto 
 ### O que é Pairs Trading
+A literatura (Gatev et al., 2006; Vidyamurthy, 2004) classifica os vínculos econômicos válidos em seis categorias:
+
+(i) Mesma empresa, classes diferentes — ações ON e PN da mesma companhia compartilham o mesmo fluxo de caixa e diferem apenas em direitos políticos. Ex.: PETR3/PETR4, GGBR3/GGBR4.
+
+(ii) Holding e controlada — o valor da holding deriva da participação na controlada, com desconto historicamente estável. Ex.: BRAP4/VALE3, ITSA4/ITUB4.
+
+(iii) Mesmo setor e modelo de negócio — concorrentes sujeitos aos mesmos drivers de demanda, custos e regulação. Ex.: ITUB4/BBDC4 (bancos), JBSS3/MRFG3 (frigoríficos), ASAI3/CRFB3 (atacarejo).
+
+(iv) Mesma cadeia produtiva — empresas em elos diferentes da mesma cadeia, expostas ao mesmo ciclo. Ex.: VALE3/CSNA3 (minério-aço), SUZB3/KLBN11 (papel-celulose).
+
+(v) Fator macro comum — ativos cuja relação vem de exposição compartilhada a um driver externo (câmbio, juros, commodity). Ex.: exportadoras dolarizadas; empresas alavancadas sensíveis à Selic.
+
+(vi) Arbitragem direta — mesmo ativo em mercados diferentes (ações ON na B3 vs. ADRs na NYSE).
+
 ### Histórico 
 ### Importância para o mercado financeiro  
 
