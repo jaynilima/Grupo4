@@ -2,6 +2,13 @@
 
 ## Contexto 
 ### O que é Pairs Trading
+
+Pairs trading é uma estratégia de arbitragem estatística que opera sobre a relação de preços entre dois ativos com vínculo econômico comprovado. A ideia central é simples: se dois ativos compartilham os mesmos fundamentos — mesmo setor, mesma cadeia produtiva, mesma empresa em classes diferentes — seus preços tendem a se mover juntos ao longo do tempo. Quando, por alguma razão momentânea, essa relação se rompe e os preços se afastam mais do que o histórico indica como normal, a estratégia aposta na convergência: compra-se o ativo que ficou "barato" e vende-se simultaneamente o ativo que ficou "caro", esperando que o equilíbrio se restabeleça.
+
+Essa estrutura de operação — compra de um ativo e venda de outro ao mesmo tempo — é o que a torna *market-neutral*: o retorno não depende se o mercado sobe ou cai, mas exclusivamente de o spread entre os dois ativos voltar ao seu padrão histórico. Uma queda geral do mercado, por exemplo, afeta os dois ativos de forma semelhante e não compromete a operação.
+
+O critério estatístico que sustenta a estratégia é a **cointegração**: dois ativos são cointegrados quando, apesar de cada preço individualmente ser imprevisível (seguindo um passeio aleatório), a diferença entre eles é estacionária — oscila em torno de uma média com variância estável. É essa propriedade que garante que o spread *tem* de voltar, no sentido estatístico, e que distingue pairs trading de uma aposta direcional.
+
 A literatura (Gatev et al., 2006; Vidyamurthy, 2004) classifica os vínculos econômicos válidos em seis categorias:
 
 (i) Mesma empresa, classes diferentes — ações ON e PN da mesma companhia compartilham o mesmo fluxo de caixa e diferem apenas em direitos políticos. Ex.: PETR3/PETR4, GGBR3/GGBR4.
