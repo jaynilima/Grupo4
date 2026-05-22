@@ -74,11 +74,6 @@ estatístico, espera-se que ele reverta — gerando a oportunidade.
 ## 3. Como Rodar
 
 ### Pré-requisitos
-
-```bash
-pip install -r requirements.txt
-```
-
 ```
 pandas>=1.5  numpy>=1.23  matplotlib>=3.6  statsmodels>=0.13  scikit-learn>=1.1
 ```
