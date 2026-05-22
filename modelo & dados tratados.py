@@ -1,10 +1,7 @@
 """
-╔══════════════════════════════════════════════════════════════╗
-║         PAIRS TRADING B3 — Script Principal (PC)            ║
-║                                                              ║
-║  Execute: python rodar.py                                    ║
-║  Saída  : pasta output/  (CSVs + graficos/)                  ║
-╚══════════════════════════════════════════════════════════════╝
+Pairs Trading B3 — script principal
+Execute: python modelo & dados tratados.py
+Saída: pasta output/ (CSVs + graficos/)
 """
 
 import os, sys, time, warnings
@@ -26,16 +23,14 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
-# ════════════════════════════════════════════════════════════════
-#  CONFIGURACAO — UNICO LUGAR PARA EDITAR
-# ════════════════════════════════════════════════════════════════
+# Configuração — editar apenas aqui
 
 # Coloque aqui o nome do seu arquivo CSV (sem precisar do caminho
 # completo se ele estiver na mesma pasta que este script).
 # Exemplos:
-#   NOME_CSV = "dados_economatica_B3 (2).csv"
+#   NOME_CSV = "dados_economatica_B3.csv"
 #   NOME_CSV = "minha_base.csv"
-NOME_CSV = "dados_economatica_B3 (2).csv"
+NOME_CSV = "dados_economatica_B3.csv"
 
 ANO_INICIO   = 2015
 ANO_FIM      = 2025
@@ -45,9 +40,7 @@ CORR_MIN     = 0.80
 PVALUE_MAX   = 0.05
 
 
-# ════════════════════════════════════════════════════════════════
-#  LOCALIZACAO DO CSV — busca automatica
-# ════════════════════════════════════════════════════════════════
+# Localização do CSV — busca automática
 
 def encontrar_csv(nome):
     """Procura o CSV na pasta do script e nas pastas comuns do usuario."""
@@ -76,9 +69,7 @@ SEP  = "=" * 66
 SEP2 = "-" * 66
 
 
-# ════════════════════════════════════════════════════════════════
-#  BANNER INICIAL — VERIFIQUE O CAMINHO
-# ════════════════════════════════════════════════════════════════
+# Banner inicial — verificação do caminho
 
 print()
 print(SEP)
@@ -133,9 +124,7 @@ if sys.stdin.isatty():
     sys.exit(0)
 
 
-# ════════════════════════════════════════════════════════════════
-#  PALETA E ESTILO
-# ════════════════════════════════════════════════════════════════
+# Paleta e estilo visual
 
 C = dict(azul="#1f4e79", azul2="#2e75b6", verde="#1e7e34",
          verm="#c0392b", laran="#e67e22", cinza="#7f8c8d",
@@ -149,9 +138,7 @@ plt.rcParams.update({
 })
 
 
-# ════════════════════════════════════════════════════════════════
-#  1. CARREGAMENTO E LIMPEZA
-# ════════════════════════════════════════════════════════════════
+# 1. Carregamento e limpeza
 
 print(f"[1/4] Carregando dados...")
 t0 = time.time()
@@ -185,9 +172,7 @@ print(f"      {len(df_raw):,} linhas | "
       f"{df_raw['Ativo'].nunique()} ativos | {time.time()-t0:.0f}s")
 
 
-# ════════════════════════════════════════════════════════════════
-#  2. PIPELINE POR JANELA ANUAL
-# ════════════════════════════════════════════════════════════════
+# 2. Pipeline por janela anual
 
 print(f"\n[2/4] Pipeline por janela anual...")
 
@@ -203,7 +188,7 @@ for ano in anos:
     t_ano  = time.time()
     df_ano = df_raw[df_raw["Ano"] == ano].copy()
 
-    # ── Top N por volume ────────────────────────────────────────
+    # top N por volume
     stats    = df_ano.groupby("Ativo").agg(
         Dias=("Data", "nunique"),
         Volume=("Volume_BRL_k", "sum"),
@@ -218,7 +203,7 @@ for ano in anos:
     todos_top100.append(top100)
     tickers = top100["Ativo"].tolist()
 
-    # ── Matriz de precos ────────────────────────────────────────
+    # matriz de preços
     df_f   = df_ano[df_ano["Ativo"].isin(tickers)]
     precos = (df_f.pivot_table(index="Data", columns="Ativo",
                                 values="Fechamento", aggfunc="last")
@@ -227,13 +212,13 @@ for ano in anos:
     tickers = list(precos.columns)
     logP    = np.log(precos)
 
-    # ── Correlacao ──────────────────────────────────────────────
+    # correlação
     corr_mat   = logP.corr()
     candidatos = [(a, b, round(corr_mat.loc[a, b], 4))
                   for a, b in combinations(tickers, 2)
                   if abs(corr_mat.loc[a, b]) >= CORR_MIN]
 
-    # ── Engle-Granger ADF ────────────────────────────────────────
+    # teste de cointegração Engle-Granger
     pares_validos = []
     for a, b, corr in candidatos:
         try:
@@ -243,7 +228,7 @@ for ano in anos:
         except Exception:
             continue
 
-    # ── OLS -> spread -> z-score ─────────────────────────────────
+    # OLS → spread → z-score
     for a, b, corr, pval in pares_validos:
         ya = logP[a].values
         xb = logP[b].values.reshape(-1, 1)
@@ -291,9 +276,7 @@ for ano in anos:
           f"{time.time()-t_ano:.0f}s")
 
 
-# ════════════════════════════════════════════════════════════════
-#  3. CONSOLIDACAO E SALVAMENTO DE CSVs
-# ════════════════════════════════════════════════════════════════
+# 3. Consolidação e salvamento de CSVs
 
 print(f"\n[3/4] Consolidando e salvando CSVs...")
 
@@ -341,9 +324,7 @@ print(f"      {len(pares_df)} registros | "
 print(f"      CSVs salvos em: output/")
 
 
-# ════════════════════════════════════════════════════════════════
-#  4. GRAFICOS
-# ════════════════════════════════════════════════════════════════
+# 4. Geração de gráficos
 
 print(f"\n[4/4] Gerando graficos...")
 
@@ -354,7 +335,7 @@ def salvar(fig, nome):
     print(f"      {nome}")
 
 
-# ── G1: Universo anual ───────────────────────────────────────────
+# G1: universo anual
 df_p = resumo_df.copy()
 df_p["Vol_BI"] = df_p["Volume_Total_MM"] / 1_000
 
@@ -404,7 +385,7 @@ plt.tight_layout()
 salvar(fig, "01_universo_anual.png")
 
 
-# ── G2: Persistencia ────────────────────────────────────────────
+# G2: persistência dos ativos────
 n_tot  = len(anos)
 top30  = persistencia.head(30)
 cbs    = [C["verde"] if j == n_tot else C["azul2"] if j >= n_tot-2
@@ -432,7 +413,7 @@ plt.tight_layout()
 salvar(fig, "02_persistencia_ativos.png")
 
 
-# ── G3: Analise dos pares ────────────────────────────────────────
+# G3: análise dos pares cointegrados
 fig, axes = plt.subplots(1, 3, figsize=(17, 5))
 fig.suptitle(f"Analise de Cointegração — {len(pares_df)} pares-janela | "
              f"{freq_pares.shape[0]} pares unicos",
@@ -468,7 +449,7 @@ plt.tight_layout()
 salvar(fig, "03_pares_cointegrados.png")
 
 
-# ── G4: Ranking de pares ────────────────────────────────────────
+# G4: ranking de pares
 fig, axes = plt.subplots(1, 2, figsize=(16, 7))
 fig.suptitle("Ranking dos Pares — Frequencia e Forca Estatistica",
              fontweight="bold", fontsize=13)
@@ -508,7 +489,7 @@ plt.tight_layout()
 salvar(fig, "04_pares_ranking.png")
 
 
-# ── G5: Parametros OLS ──────────────────────────────────────────
+# G5: parâmetros OLS
 fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 fig.suptitle("Parametros OLS — log(A) = alpha + beta*log(B)",
              fontsize=13, fontweight="bold")
@@ -541,7 +522,7 @@ plt.tight_layout()
 salvar(fig, "05_parametros_ols.png")
 
 
-# ── G6: Z-score top 6 pares ─────────────────────────────────────
+# G6: z-score dos top 6 pares
 pares_z = sorted(zscore_global.items(), key=lambda x: x[1]["P_Value"])
 top6    = pares_z[:6]
 
@@ -582,7 +563,7 @@ plt.tight_layout()
 salvar(fig, "06_zscore_top6.png")
 
 
-# ── G7: Spread top 4 ────────────────────────────────────────────
+# G7: spread bruto dos top 4 pares
 top4 = pares_z[:4]
 
 fig, axes = plt.subplots(2, 2, figsize=(16, 9))
@@ -617,7 +598,7 @@ plt.tight_layout()
 salvar(fig, "07_spread_top4.png")
 
 
-# ── G8: Par destaque ────────────────────────────────────────────
+# G8: par destaque (melhor p-value)
 (ad, bd), id_ = pares_z[0]
 zd = id_["Z"].dropna()
 sd = id_["S"].dropna()
@@ -681,7 +662,7 @@ plt.close(fig)
 print("      08_par_destaque.png")
 
 
-# ── G9: Sinais ativos ao longo do tempo ─────────────────────────
+# G9: sinais ativos ao longo do tempo
 sl = (z_wide <= -2).sum(axis=1)
 ss = (z_wide >=  2).sum(axis=1)
 st = sl + ss
@@ -717,7 +698,7 @@ plt.tight_layout()
 salvar(fig, "09_sinais_temporais.png")
 
 
-# ── G10: Snapshot atual ──────────────────────────────────────────
+# G10: snapshot atual dos z-scores
 ultimo_z = z_wide.iloc[-1].dropna().sort_values()
 nl_now   = (ultimo_z <= -2).sum()
 ns_now   = (ultimo_z >=  2).sum()
@@ -754,7 +735,7 @@ plt.tight_layout()
 salvar(fig, "10_snapshot_zscores.png")
 
 
-# ── G11: Heatmap pares x anos ────────────────────────────────────
+# G11: heatmap pares × anos
 pares_df["Par"] = pares_df["Ativo_A"] + "_" + pares_df["Ativo_B"]
 top_hm = freq_pares.head(30).copy()
 top_hm["Par"] = top_hm["Ativo_A"] + "_" + top_hm["Ativo_B"]
@@ -793,7 +774,7 @@ plt.tight_layout()
 salvar(fig, "11_heatmap_pares.png")
 
 
-# ── G12: Pipeline ───────────────────────────────────────────────
+# G12: diagrama do pipeline
 fig, ax = plt.subplots(figsize=(15, 7))
 ax.set_xlim(0, 14); ax.set_ylim(0, 8); ax.axis("off")
 
@@ -860,9 +841,7 @@ plt.tight_layout()
 salvar(fig, "12_pipeline.png")
 
 
-# ════════════════════════════════════════════════════════════════
-#  RESUMO FINAL
-# ════════════════════════════════════════════════════════════════
+# Resumo final
 
 print()
 print(SEP)
