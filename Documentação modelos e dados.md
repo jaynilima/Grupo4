@@ -125,7 +125,7 @@ Se aparecer `[ERRO]`, o CSV não foi encontrado. O script procura automaticament
 ### Parâmetros ajustáveis (topo do `rodar.py`)
 
 ```python
-NOME_CSV     = "dados_economatica_B3 (2).csv"
+NOME_CSV     = "dados economatica.csv"
 ANO_INICIO   = 2015
 ANO_FIM      = 2025
 TOP_N        = 100        # ativos selecionados por janela anual
@@ -362,18 +362,36 @@ Decisões tomadas durante o desenvolvimento e o raciocínio por trás de cada um
 
 Pares que aparecem como cointegrados em mais janelas anuais (mais estáveis estruturalmente):
 
-| Par | Janelas | p-value mín. | Correlação média | Lógica econômica |
-|---|---|---|---|---|
-| IGTA3 × MULT3 | **5** | 0,0007 | 0,973 | Ambas são FIIs/incorporadoras de shopping centers |
-| CPFE3 × EQTL3 | **4** | 0,0057 | 0,932 | Distribuidoras de energia — regulação e tarifa idênticas |
-| COGN3 × LREN3 | **4** | 0,0096 | 0,925 | Varejo e serviços ao consumidor |
-| BBDC3 × MULT3 | **4** | 0,0123 | 0,896 | — |
-| PETR3 × PETR4 | **3** | 0,0011 | 0,996 | ON e PN da mesma empresa (Petrobras) |
-| BBAS3 × CPFE3 | **3** | 0,0016 | 0,902 | — |
-| CPFE3 × VBBR3 | **3** | 0,0024 | 0,860 | — |
-| MULT3 × RENT3 | **3** | 0,0034 | 0,920 | Blue chips de consumo com perfil de crescimento similar |
-| ITSA4 × ITUB4 | **3** | 0,0037 | 0,990 | Holding (Itaúsa) e banco controlado (Itaú Unibanco) |
-| ITSA4 × MULT3 | **3** | 0,0044 | 0,910 | — |
+### Tabela de Cointegração e Lógica Econômica (Pairs Trading)
+
+A classificação dos vínculos econômicos segue a literatura clássica de Pairs Trading (Gatev et al., 2006; Vidyamurthy, 2004), dividida em seis categorias principais:
+* **(i)** Mesma empresa, classes diferentes (ON/PN)
+* **(ii)** Holding e controlada
+* **(iii)** Mesmo setor e modelo de negócio
+* **(iv)** Mesma cadeia produtiva
+* **(v)** Fator macro comum
+* **(vi)** Arbitragem direta
+
+| Par | Janelas | p-value mín. | Correlação média | Lógica Econômica (Classificação) |
+| :--- | :---: | :---: | :---: | :--- |
+| **IGTA3 × MULT3** | 5 | 0,0007 | 0,973 | **(iii)** Mesmo setor/modelo — FIIs e administradoras de shopping centers. |
+| **CPFE3 × EQTL3** | 4 | 0,0057 | 0,932 | **(iii)** Mesmo setor/modelo — Distribuidoras de energia sob mesma regulação tarifária. |
+| **COGN3 × LREN3** | 4 | 0,0096 | 0,925 | **(v)** Fator macro comum — Exposição ao consumo cíclico e varejo doméstico. |
+| **BBDC3 × MULT3** | 4 | 0,0123 | 0,896 | **(v)** Fator macro comum — Ciclo doméstico (sensibilidade à Taxa Selic e crédito). |
+| **PETR3 × PETR4** | 3 | 0,0011 | 0,996 | **(i)** Mesma empresa, classes diferentes — Ações ON e PN da Petrobras. |
+| **BBAS3 × CPFE3** | 3 | 0,0016 | 0,902 | **(v)** Fator macro comum — Ações defensivas, geradoras de caixa e *bond proxies* (sensíveis ao juro longo). |
+| **CPFE3 × VBBR3** | 3 | 0,0024 | 0,860 | **(v)** Fator macro comum — Setor de utilidade/infraestrutura e distribuição capilar. |
+| **MULT3 × RENT3** | 3 | 0,0034 | 0,920 | **(v)** Fator macro comum — *Blue chips* expostas ao crescimento da atividade econômica interna. |
+| **ITSA4 × ITUB4** | 3 | 0,0037 | 0,990 | **(ii)** Holding e controlada — Desconto holding estrutural entre Itaúsa e Itaú Unibanco. |
+| **ITSA4 × MULT3** | 3 | 0,0044 | 0,910 | **(v)** Fator macro comum — Ciclo doméstico (exposição indireta do setor financeiro e imobiliário ao juro). |
+
+---
+
+### Notas de Backing Econômico para os Pares de "Fator Macro Comum" (v)
+
+* **BBDC3 × MULT3 / ITSA4 × MULT3:** O elo estatístico reside no comportamento direcional frente à curva de juros futura. A queda da Selic reduz a inadimplência nos bancos (melhorando o spread e a carteira do Bradesco/Itaú) ao mesmo tempo em que reduz o custo de capital e aumenta o fluxo de pedestres/vendas nos shoppings da Multiplan.
+* **BBAS3 × CPFE3:** Ambos os ativos competem pelo *duration* da carteira de dividendos. Por possuírem fluxos de caixa altamente previsíveis e payouts estáveis, comportam-se como títulos de renda fixa prefixados, distorcendo o spread do par conforme a oscilação do risco-país e do DI.
+* **CPFE3 × VBBR3:** Par ancorado na atividade econômica de base e volume de circulação (energia consumida vs. combustível distribuído). Compartilham forte resiliência operacional e alta correlação em momentos de contração ou expansão do PIB interno.
 
 Pares como `PETR3 × PETR4` e `ITSA4 × ITUB4` são os "pares naturais" clássicos da B3: mesma empresa em classes diferentes ou holding e controlada. São os candidatos mais fortes para o backtesting.
 
@@ -392,7 +410,7 @@ Pares como `PETR3 × PETR4` e `ITSA4 × ITUB4` são os "pares naturais" clássic
 | AMER3 × YDUQ3 | 2017 | 0,976 | 0,000013 | 0,854 | 0,052 |
 | LREN3 × RUMO3 | 2016 | 0,854 | 0,000018 | 0,339 | 0,080 |
 
-> **Nota:** β negativo (ex: EMBJ3 × RUMO3) indica relação inversa entre os log-preços — quando um sobe, o outro tende a cair. A posição continua sendo hedge-neutral, porém com lógica econômica mais difícil de explicar. Atenção na interpretação do sinal de entrada.
+> **Nota:** β negativo (ex: EMBJ3 × RUMO3) indica relação inversa entre os log-preços — quando um sobe, o outro tende a cair. A posição continua sendo hedge-neutral, porém com lógica econômica mais difícil de explicar. É preciso atenção na interpretação do sinal de entrada.
 
 ### 6.4 Alertas Ativos — Snapshot de 12/11/2025
 
