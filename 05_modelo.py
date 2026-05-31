@@ -1,7 +1,20 @@
 """
-Pairs Trading B3 — script principal
-Execute: python modelo & dados tratados.py
-Saída: pasta output/ (CSVs + graficos/)
+Pairs Trading B3 — Modelo Consolidado v4 (Kalman Filter)
+=========================================================
+Pipeline completo: dados brutos → liquidez → distância mínima →
+                   cointegração Engle-Granger → Kalman Filter → z-score dinâmico
+
+Metodologia:
+  Gatev, Goetzmann & Rouwenhorst (2006) — pré-filtro por distância mínima,
+    janelas mensais de 504 pregões
+  Engle & Granger (1987) — cointegração para validação do par
+  Avellaneda & Lee (2010) — Kalman Filter para beta dinâmico (substituição do
+    OLS estático)
+
+Kalman State Space:
+  Observação : log(A_t) = alpha_t + beta_t * log(B_t) + ε_t,  ε ~ N(0, R)
+  Transição  : [alpha, beta]_t = [alpha, beta]_{t-1} + δ_t,   δ ~ N(0, Q)
+  → beta se adapta ao longo do tempo; z-score = inovação / sqrt(S)
 """
 
 import os, sys, time, warnings
@@ -13,123 +26,88 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.patches as mpatches
 from matplotlib.gridspec import GridSpec
-from matplotlib.ticker import FuncFormatter
-from itertools import combinations
 from statsmodels.tsa.stattools import coint
-from sklearn.linear_model import LinearRegression
 
 warnings.filterwarnings("ignore")
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
-# Configuração — editar apenas aqui
+# ─────────────────────────────────────────────────────────────────────────────
+#  CONFIGURAÇÃO  — edite apenas aqui
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Coloque aqui o nome do seu arquivo CSV (sem precisar do caminho
-# completo se ele estiver na mesma pasta que este script).
-# Exemplos:
-#   NOME_CSV = "dados_economatica_B3.csv"
-#   NOME_CSV = "minha_base.csv"
-NOME_CSV = "dados_economatica_B3.csv"
+NOME_CSV         = "dados_economatica_B3.csv"
+NOME_CSV_SETORES = "economatica_B3_setores.csv"
 
-ANO_INICIO   = 2015
-ANO_FIM      = 2025
-TOP_N        = 100
-MIN_PREGOES  = 0.60
-CORR_MIN     = 0.80
-PVALUE_MAX   = 0.05
+ANO_INICIO       = 2013    # carrega dados desde aqui (precisa de 2 anos de história)
+ANO_FIM          = 2025
+JANELA_FORMACAO  = 504     # pregões por janela ≈ 2 anos (Gatev et al.)
+COBERTURA_MIN    = 0.80    # cobertura mínima de pregões por ativo
+OBS_MINIMAS_PAR  = int(JANELA_FORMACAO * COBERTURA_MIN)  # = 403 (notebook 04)
+MAX_CAND_DIST    = 500     # top N candidatos por distância mínima
+TOP_N_PARES      = 20      # top N pares cointegrados por janela
+PVALUE_MAX       = 0.05    # p-value máximo Engle-Granger
+RAPIDO           = False   # True → maxlag=5 no ADF (mais rápido, menos preciso)
+
+# ── Kalman Filter (Avellaneda & Lee, 2010) ──────────────────────────────────
+KALMAN_DELTA     = 1e-5    # velocidade de adaptação de alpha/beta (maior = adapta mais)
+KALMAN_VE        = None    # variância R: None = estimada do warm-start OLS, float = fixo
+KALMAN_N_WARM    = 50      # obs para warm-start OLS (inicialização do estado)
+
+GERAR_GRAFICOS   = True    # False → pula gráficos (~40% mais rápido)
+FILTRAR_SETOR    = True   # True → só pares do mesmo setor econômico
 
 
-# Localização do CSV — busca automática
+# ─────────────────────────────────────────────────────────────────────────────
+#  LOCALIZAÇÃO DOS ARQUIVOS
+# ─────────────────────────────────────────────────────────────────────────────
 
-def encontrar_csv(nome):
-    """Procura o CSV na pasta do script e nas pastas comuns do usuario."""
-    pasta_script = os.path.dirname(os.path.abspath(__file__))
-    candidatos = [
-        os.path.join(pasta_script, nome),
-        os.path.join(os.path.expanduser("~"), "Desktop", nome),
-        os.path.join(os.path.expanduser("~"), "Documents", nome),
-        os.path.join(os.path.expanduser("~"), "Downloads", nome),
-        os.path.join(os.path.expanduser("~"), "pairs trading", nome),
-        os.path.join(os.path.expanduser("~"), nome),
-    ]
-    for p in candidatos:
+def _encontrar(nome):
+    raiz = os.path.dirname(os.path.abspath(__file__))
+    casa = os.path.expanduser("~")
+    for pasta in [raiz,
+                  os.path.join(casa, "Desktop"),
+                  os.path.join(casa, "Documents"),
+                  os.path.join(casa, "Downloads")]:
+        p = os.path.join(pasta, nome)
         if os.path.isfile(p):
             return p
     return None
 
-CSV_PATH = encontrar_csv(NOME_CSV)
-
+CSV_PATH     = _encontrar(NOME_CSV)
+SETORES_PATH = _encontrar(NOME_CSV_SETORES)
 PASTA_SCRIPT = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR   = os.path.join(PASTA_SCRIPT, "output")
 CHARTS_DIR   = os.path.join(OUTPUT_DIR, "graficos")
 os.makedirs(CHARTS_DIR, exist_ok=True)
 
-SEP  = "=" * 66
-SEP2 = "-" * 66
-
-
-# Banner inicial — verificação do caminho
-
-print()
-print(SEP)
-print("  PAIRS TRADING B3")
-print(SEP)
-print()
-print("  VERIFIQUE O CAMINHO DO ARQUIVO CSV:")
-print()
-
+SEP = "=" * 66
+print(f"\n{SEP}\n  PAIRS TRADING B3  —  v4 (Kalman Filter)\n{SEP}")
 if CSV_PATH:
-    print(f"  [OK] Arquivo encontrado:")
-    print(f"       {CSV_PATH}")
+    print(f"  [OK] Dados  : {CSV_PATH}")
 else:
-    print(f"  [ERRO] Arquivo NAO encontrado: {NOME_CSV}")
-    print()
-    print("  O que fazer:")
-    print(f"  1. Abra este script: rodar.py")
-    print(f"  2. Na linha  NOME_CSV = ...  coloque o nome exato do seu CSV")
-    print(f"  3. Coloque o CSV na mesma pasta deste script:")
-    print(f"     {PASTA_SCRIPT}")
-    print()
-    print("  Pastas onde o script procurou:")
-    pasta_script = os.path.dirname(os.path.abspath(__file__))
-    for p in [pasta_script,
-              os.path.join(os.path.expanduser("~"), "Desktop"),
-              os.path.join(os.path.expanduser("~"), "Documents"),
-              os.path.join(os.path.expanduser("~"), "Downloads")]:
-        print(f"     {p}")
-    print()
-    print(SEP)
+    print(f"  [ERRO] CSV não encontrado: {NOME_CSV}")
     sys.exit(1)
-
-print()
-print("  Saida (CSVs + graficos):")
-print(f"       {OUTPUT_DIR}")
-print()
-print("  Parametros:")
-print(f"       Anos    : {ANO_INICIO} a {ANO_FIM}")
-print(f"       Top N   : {TOP_N} ativos/ano por volume")
-print(f"       Corr min: {CORR_MIN}")
-print(f"       p-value : < {PVALUE_MAX} (Engle-Granger)")
-print()
-print(SEP)
-
-# Pausa para o usuario confirmar o caminho
-if sys.stdin.isatty():
-    try:
-        input("\n  Pressione ENTER para continuar (ou Ctrl+C para cancelar)...\n")
-    except (KeyboardInterrupt, EOFError):
-        print("\n  Cancelado pelo usuario.")
-        sys.exit(0)
-    sys.exit(0)
+if SETORES_PATH:
+    print(f"  [OK] Setores: {SETORES_PATH}")
+else:
+    print(f"  [AVISO] Setores não encontrado — pares sem tag setorial")
+print(f"  Saída       : {OUTPUT_DIR}")
+print(f"  Anos        : {ANO_INICIO}–{ANO_FIM}  |  Janela: {JANELA_FORMACAO} pregões")
+print(f"  Dist top-{MAX_CAND_DIST}  |  Coint top-{TOP_N_PARES}/janela  |  p<{PVALUE_MAX}")
+print(f"  Kalman δ={KALMAN_DELTA:.0e}  |  warm={KALMAN_N_WARM}  |  "
+      f"gráficos: {'sim' if GERAR_GRAFICOS else 'não'}")
+print(f"{SEP}\n")
 
 
-# Paleta e estilo visual
+# ─────────────────────────────────────────────────────────────────────────────
+#  PALETA VISUAL
+# ─────────────────────────────────────────────────────────────────────────────
 
 C = dict(azul="#1f4e79", azul2="#2e75b6", verde="#1e7e34",
          verm="#c0392b", laran="#e67e22", cinza="#7f8c8d",
          amar="#f1c40f", roxo="#8e44ad", fundo="#f8f9fa", grade="#dde1e7")
-
 plt.rcParams.update({
     "figure.facecolor": C["fundo"], "axes.facecolor": C["fundo"],
     "axes.grid": True, "grid.color": C["grade"], "grid.linewidth": 0.6,
@@ -138,751 +116,958 @@ plt.rcParams.update({
 })
 
 
-# 1. Carregamento e limpeza
+# ─────────────────────────────────────────────────────────────────────────────
+#  1. SETORES
+# ─────────────────────────────────────────────────────────────────────────────
 
-print(f"[1/4] Carregando dados...")
+def _carregar_setores(caminho):
+    """Dict: ticker → {setor, subsetor, segmento}."""
+    if not caminho:
+        return {}
+    mapa = {}
+    try:
+        with open(caminho, encoding="latin-1") as f:
+            f.readline()
+            for linha in f:
+                p = linha.strip().split('","')
+                if len(p) < 10:
+                    continue
+                ticker = p[0].lstrip('"').replace("<XBSP>", "").strip()
+                def _v(s):
+                    s = s.rstrip('"').strip()
+                    return None if s in ("-", "") else s
+                if ticker:
+                    mapa[ticker] = {
+                        "setor":    _v(p[7]),
+                        "subsetor": _v(p[8]),
+                        "segmento": _v(p[9]),
+                    }
+    except Exception as exc:
+        print(f"  [AVISO] Erro ao ler setores: {exc}")
+    return mapa
+
+print("[1/4] Carregando setores...")
+SETORES   = _carregar_setores(SETORES_PATH)
+n_c_setor = sum(1 for v in SETORES.values() if v.get("setor"))
+print(f"      {len(SETORES)} tickers | {n_c_setor} com setor definido\n")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  2. DADOS BRUTOS
+# ─────────────────────────────────────────────────────────────────────────────
+
+print(f"[2/4] Carregando {NOME_CSV}...")
 t0 = time.time()
 
-COL_NAMES = ["Ativo", "Data", "Fechamento", "Abertura", "Minimo",
-             "Maximo", "Medio", "Q_Negs", "Volume_BRL_k", "Q_Titulos_k"]
+_COLS = ["Ativo", "Data", "Fechamento", "Abertura", "Minimo",
+         "Maximo", "Medio", "Q_Negs", "Volume_BRL_k", "Q_Titulos_k"]
 
 chunks = []
-for chunk in pd.read_csv(
-        CSV_PATH, encoding="latin-1", names=COL_NAMES,
-        header=0, chunksize=200_000, low_memory=False):
-
-    chunk["Ativo"] = chunk["Ativo"].str.replace("<XBSP>", "", regex=False).str.strip()
-    chunk["Data"]  = pd.to_datetime(chunk["Data"], errors="coerce")
-    chunk = chunk[chunk["Data"].dt.year.between(ANO_INICIO, ANO_FIM)].copy()
-
-    for col in ["Fechamento", "Volume_BRL_k"]:
-        chunk[col] = pd.to_numeric(
-            chunk[col].astype(str).str.replace(",", ".", regex=False)
-                       .replace("-", np.nan), errors="coerce")
-
-    chunk = chunk.dropna(subset=["Fechamento", "Volume_BRL_k"])
-    chunk["Ano"] = chunk["Data"].dt.year
-    chunks.append(chunk[["Ativo", "Data", "Ano", "Fechamento", "Volume_BRL_k"]])
+for _ck in pd.read_csv(CSV_PATH, encoding="latin-1", names=_COLS,
+                       header=0, chunksize=200_000, low_memory=False):
+    _ck["Ativo"] = (_ck["Ativo"].astype(str)
+                    .str.replace("<XBSP>", "", regex=False).str.strip())
+    _ck["Data"]  = pd.to_datetime(_ck["Data"], errors="coerce")
+    _ck = _ck[_ck["Data"].dt.year.between(ANO_INICIO, ANO_FIM)].copy()
+    for col in ("Fechamento", "Volume_BRL_k", "Q_Negs"):
+        _ck[col] = pd.to_numeric(
+            _ck[col].astype(str).str.replace(",", ".", regex=False)
+                    .replace("-", np.nan), errors="coerce")
+    _ck = _ck.dropna(subset=["Fechamento"])
+    _ck = _ck[_ck["Fechamento"] > 0]
+    _ck["Volume_BRL_k"] = _ck["Volume_BRL_k"].fillna(0.0)
+    _ck["Q_Negs"]       = _ck["Q_Negs"].fillna(0.0)
+    chunks.append(_ck[["Ativo", "Data", "Fechamento", "Volume_BRL_k", "Q_Negs"]])
 
 df_raw = pd.concat(chunks, ignore_index=True)
 del chunks
 
 print(f"      {len(df_raw):,} linhas | "
-      f"{df_raw['Data'].min().date()} a {df_raw['Data'].max().date()} | "
-      f"{df_raw['Ativo'].nunique()} ativos | {time.time()-t0:.0f}s")
+      f"{df_raw['Data'].min().date()}–{df_raw['Data'].max().date()} | "
+      f"{df_raw['Ativo'].nunique()} ativos | {time.time()-t0:.0f}s\n")
 
 
-# 2. Pipeline por janela anual
+# ─────────────────────────────────────────────────────────────────────────────
+#  3. KALMAN FILTER  (Avellaneda & Lee, 2010)
+# ─────────────────────────────────────────────────────────────────────────────
 
-print(f"\n[2/4] Pipeline por janela anual...")
+def kalman_spread(log_a, log_b,
+                  delta=1e-5, ve=None, n_warm=50):
+    """
+    Kalman Filter para beta dinâmico em pairs trading.
 
-anos = sorted(a for a in df_raw["Ano"].unique()
-              if ANO_INICIO <= a <= ANO_FIM)
+    State space:
+        obs:   log_a_t = alpha_t + beta_t * log_b_t + ε_t,  ε ~ N(0, R)
+        trans: theta_t = theta_{t-1} + δ_t,                  δ ~ N(0, Q)
+        theta = [alpha, beta]
 
-resumo_janelas = []
-todos_top100   = []
-pares_por_ano  = []
-zscore_global  = {}   # (a,b) -> dict com parametros e serie
+    Warm start: OLS nos primeiros n_warm obs inicializa theta_0 e R.
 
-for ano in anos:
-    t_ano  = time.time()
-    df_ano = df_raw[df_raw["Ano"] == ano].copy()
+    Returns
+    -------
+    alphas : (T,) alpha dinâmico (intercepto)
+    betas  : (T,) beta  dinâmico (hedge ratio)
+    z_arr  : (T,) z-score = inovação / sqrt(variância da inovação)
+    innov  : (T,) inovações brutas (spread no espaço log)
+    S_arr  : (T,) variância da inovação (para análise de incerteza)
+    """
+    T  = len(log_a)
+    Q  = delta * np.eye(2)          # ruído do estado (random walk)
 
-    # top N por volume
-    stats    = df_ano.groupby("Ativo").agg(
-        Dias=("Data", "nunique"),
-        Volume=("Volume_BRL_k", "sum"),
-        Preco_Ultimo=("Fechamento", "last"),
+    # ── warm start: OLS nos primeiros n_warm obs ─────────────────────────
+    n_w = max(2, min(n_warm, T // 4))
+    xw, yw = log_b[:n_w], log_a[:n_w]
+    sb, sa   = xw.sum(), yw.sum()
+    sbb, sab = (xw * xw).sum(), (yw * xw).sum()
+    den      = n_w * sbb - sb * sb
+
+    if abs(den) > 1e-12 and n_w >= 5:
+        beta0  = (n_w * sab - sb * sa) / den
+        alpha0 = (sa - beta0 * sb) / n_w
+        resid  = yw - alpha0 - beta0 * xw
+        R      = max(resid.var(), 1e-8) if ve is None else max(ve, 1e-8)
+    else:
+        alpha0, beta0 = 0.0, 1.0
+        R = 0.001 if ve is None else ve
+
+    theta = np.array([alpha0, beta0], dtype=np.float64)
+    # P_0 pequeno → confiança moderada no warm start
+    P     = np.eye(2, dtype=np.float64) * max(R, 1e-4)
+
+    alphas = np.empty(T, dtype=np.float64)
+    betas  = np.empty(T, dtype=np.float64)
+    z_arr  = np.empty(T, dtype=np.float64)
+    innov  = np.empty(T, dtype=np.float64)
+    S_arr  = np.empty(T, dtype=np.float64)
+
+    for t in range(T):
+        H = np.array([1.0, log_b[t]])       # vetor de observação (1 × 2)
+
+        # predict
+        P_pred = P + Q                       # P não tem termo F pois F = I
+
+        # inovação
+        nu = log_a[t] - (H @ theta)
+        S  = float(H @ P_pred @ H) + R       # variância escalar
+
+        # Kalman gain
+        K = (P_pred @ H) / S                 # shape (2,)
+
+        # update
+        theta = theta + K * nu
+        P     = (np.eye(2) - np.outer(K, H)) @ P_pred
+
+        alphas[t] = theta[0]
+        betas[t]  = theta[1]
+        innov[t]  = nu
+        S_arr[t]  = S
+        z_arr[t]  = nu / max(S ** 0.5, 1e-10)
+
+    return alphas, betas, z_arr, innov, S_arr
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  4. PIPELINE DE JANELAS MENSAIS
+# ─────────────────────────────────────────────────────────────────────────────
+
+print("[3/4] Pipeline mensal (janelas de 504 pregões + Kalman Filter)...")
+t_pipe = time.time()
+
+# calendário de pregões
+calendario = np.array(sorted(df_raw["Data"].dropna().unique()),
+                      dtype="datetime64[ns]")
+cal_pd   = pd.DatetimeIndex(calendario)
+cal_list = list(cal_pd)
+cal_pos  = {d: i for i, d in enumerate(cal_list)}
+
+# datas de rebalanceamento: último pregão de cada mês
+datas_fim = (
+    pd.Series(cal_pd).to_frame("data").set_index("data")
+    .resample("ME").last().dropna().index
+)
+data_min = pd.Timestamp(calendario[JANELA_FORMACAO - 1])
+datas_fim = datas_fim[datas_fim >= data_min]
+
+print(f"      {len(datas_fim)} janelas | "
+      f"{datas_fim[0].date()} → {datas_fim[-1].date()}\n")
+
+# acumuladores
+resumo_janelas   = []
+pares_por_janela = []
+zscore_global    = {}   # (a, b) → params + Series
+
+for k, data_fim in enumerate(datas_fim):
+
+    t_j     = time.time()
+    pos_fim = cal_pos.get(data_fim, len(cal_list) - 1)
+    pos_ini = max(0, pos_fim - JANELA_FORMACAO + 1)
+    data_ini = cal_list[pos_ini]
+
+    df_j     = df_raw[(df_raw["Data"] >= data_ini) &
+                      (df_raw["Data"] <= data_fim)]
+    tot_preg = df_j["Data"].nunique()
+
+    # ── seleção de liquidez (notebook 03) ─────────────────────────────────
+    stats = df_j.groupby("Ativo").agg(
+        Dias     =("Data",        "nunique"),
+        Vol_Med  =("Volume_BRL_k","median"),
+        Negs_Med =("Q_Negs",     "median"),
     ).reset_index()
-    max_dias = stats["Dias"].max()
-    stats    = stats[stats["Dias"] >= max_dias * MIN_PREGOES]
-    top100   = stats.nlargest(TOP_N, "Volume").copy()
-    top100["Ano"]    = ano
-    top100["Rank"]   = range(1, len(top100)+1)
-    top100["Vol_MM"] = top100["Volume"] / 1_000
-    todos_top100.append(top100)
-    tickers = top100["Ativo"].tolist()
 
-    # matriz de preços
-    df_f   = df_ano[df_ano["Ativo"].isin(tickers)]
-    precos = (df_f.pivot_table(index="Data", columns="Ativo",
-                                values="Fechamento", aggfunc="last")
-                  .sort_index().ffill(limit=3))
-    precos = precos.dropna(axis=1, thresh=int(len(precos)*0.80)).dropna()
-    tickers = list(precos.columns)
-    logP    = np.log(precos)
+    stats = stats[
+        (stats["Dias"] / tot_preg >= COBERTURA_MIN) &
+        (stats["Vol_Med"]  > 0) &
+        (stats["Negs_Med"] > 0)
+    ]
+    if len(stats) >= 4:
+        stats = stats[
+            (stats["Vol_Med"]  >= stats["Vol_Med"].quantile(0.25)) &
+            (stats["Negs_Med"] >= stats["Negs_Med"].quantile(0.25))
+        ]
 
-    # correlação
-    corr_mat   = logP.corr()
-    candidatos = [(a, b, round(corr_mat.loc[a, b], 4))
-                  for a, b in combinations(tickers, 2)
-                  if abs(corr_mat.loc[a, b]) >= CORR_MIN]
+    tickers = stats["Ativo"].tolist()
+    if len(tickers) < 2:
+        continue
 
-    # teste de cointegração Engle-Granger
-    pares_validos = []
-    for a, b, corr in candidatos:
+    # ── matriz de preços ──────────────────────────────────────────────────
+    df_p = df_j[df_j["Ativo"].isin(tickers)]
+
+    # precos_raw: ffill sem dropna global → preserva NaN pairwise (distância)
+    precos_raw = (df_p.pivot_table(index="Data", columns="Ativo",
+                                   values="Fechamento", aggfunc="last")
+                      .sort_index().ffill(limit=3))
+    precos_raw = precos_raw.dropna(axis=1,
+                                   thresh=int(tot_preg * COBERTURA_MIN))
+
+    # precos: alinhada (dropna global) → OLS warm start + Kalman + coint
+    precos = precos_raw.dropna()
+    cols   = precos.columns.tolist()
+    idx    = precos.index
+    N      = len(cols)
+    if N < 2:
+        continue
+
+    mat  = precos.values.astype(np.float64)   # (T, N)
+    logP = np.log(np.clip(mat, 1e-10, None))  # (T, N)
+
+    # ── distância mínima (Gatev et al.) — pairwise sem imputação ─────────
+    # normalização por-coluna: preço / 1º preço válido (notebook 04)
+    precos_dist = precos_raw[cols]
+    primeiro_valido = precos_dist.apply(
+        lambda c: c.dropna().iloc[0] if c.dropna().shape[0] > 0 else np.nan
+    )
+    norm_arr = (precos_dist / primeiro_valido).values.astype(np.float64)
+
+    i_idx, j_idx = np.triu_indices(N, k=1)
+    dists = np.full(len(i_idx), np.inf)
+    for kk, (ii, jj) in enumerate(zip(i_idx, j_idx)):
+        col_a = norm_arr[:, ii]
+        col_b = norm_arr[:, jj]
+        mask  = ~(np.isnan(col_a) | np.isnan(col_b))
+        if mask.sum() < OBS_MINIMAS_PAR:        # check pairwise (notebook 04)
+            continue
+        dists[kk] = np.sum((col_a[mask] - col_b[mask]) ** 2)
+
+    validos = np.where(np.isfinite(dists))[0]
+    n_cand  = min(MAX_CAND_DIST, len(validos))
+    if n_cand == 0:
+        continue
+    top_rel  = np.argpartition(dists[validos], n_cand - 1)[:n_cand]
+    top_rel  = top_rel[np.argsort(dists[validos][top_rel])]
+    top_pos  = validos[top_rel]
+    candidatos = [(cols[i_idx[p]], cols[j_idx[p]], float(dists[p]))
+                  for p in top_pos]
+
+    if FILTRAR_SETOR:
+        candidatos = [
+            (a, b, d) for a, b, d in candidatos
+            if SETORES.get(a, {}).get("setor") is not None
+            and SETORES.get(a, {}).get("setor") ==
+                SETORES.get(b, {}).get("setor")
+        ]
+
+    # ── cointegração Engle-Granger + Kalman Filter ────────────────────────
+    col_idx  = {c: i for i, c in enumerate(cols)}
+    pares_ok = []
+
+    for a, b, dist in candidatos:
+        ia, ib = col_idx[a], col_idx[b]
+        ya, xb = logP[:, ia], logP[:, ib]
+
+        # validação do par: Engle-Granger na janela de formação
         try:
-            _, pval, _ = coint(logP[a].values, logP[b].values)
-            if pval <= PVALUE_MAX:
-                pares_validos.append((a, b, corr, round(pval, 6)))
+            if RAPIDO:
+                _, pval, _ = coint(ya, xb, maxlag=5, autolag=None)
+            else:
+                _, pval, _ = coint(ya, xb)
         except Exception:
             continue
-
-    # OLS → spread → z-score
-    for a, b, corr, pval in pares_validos:
-        ya = logP[a].values
-        xb = logP[b].values.reshape(-1, 1)
-        reg   = LinearRegression().fit(xb, ya)
-        alpha = reg.intercept_
-        beta  = reg.coef_[0]
-        spread   = ya - (alpha + beta * xb[:, 0])
-        mu_sp    = spread.mean()
-        sigma_sp = spread.std()
-        if sigma_sp < 1e-10:
+        if pval > PVALUE_MAX:
             continue
-        zscore = (spread - mu_sp) / sigma_sp
 
-        pares_por_ano.append({
-            "Ano": ano, "Ativo_A": a, "Ativo_B": b,
-            "Correlacao": corr, "P_Value": pval,
-            "Alpha": round(alpha, 6), "Beta": round(beta, 6),
-            "Spread_Mu": round(mu_sp, 6), "Spread_Sigma": round(sigma_sp, 6),
+        # ── Kalman Filter — beta dinâmico ─────────────────────────────────
+        alphas, betas, z_arr, innov, S_arr = kalman_spread(
+            ya, xb,
+            delta=KALMAN_DELTA,
+            ve=KALMAN_VE,
+            n_warm=KALMAN_N_WARM,
+        )
+
+        # métricas do beta dinâmico
+        beta_final  = float(betas[-1])
+        beta_mean   = float(betas.mean())
+        beta_std    = float(betas.std())
+        alpha_final = float(alphas[-1])
+        z_final     = float(z_arr[-1])
+
+        # spread bruto = inovações acumuladas ao longo da janela
+        spread_series = pd.Series(innov, index=idx, name=f"{a}__{b}")
+        z_series      = pd.Series(z_arr, index=idx,  name=f"{a}__{b}")
+        beta_series   = pd.Series(betas, index=idx,  name=f"{a}__{b}")
+
+        inf_a = SETORES.get(a, {})
+        inf_b = SETORES.get(b, {})
+        set_a = inf_a.get("setor")
+        set_b = inf_b.get("setor")
+        msm   = (set_a is not None and set_a == set_b)
+        corr  = float(np.corrcoef(ya, xb)[0, 1])
+
+        pares_ok.append({
+            "a": a, "b": b, "dist": dist, "pval": pval, "corr": corr,
+            "alpha_final": alpha_final, "beta_final": beta_final,
+            "beta_mean": beta_mean, "beta_std": beta_std,
+            "z_final": z_final,
+            "z_series": z_series, "spread_series": spread_series,
+            "beta_series": beta_series,
+            "set_a": set_a, "set_b": set_b, "msm": msm,
+            "sub_a": inf_a.get("subsetor"), "sub_b": inf_b.get("subsetor"),
+        })
+
+    # ordena por p-value + distância como tie-breaker (notebook 04)
+    pares_ok.sort(key=lambda x: (x["pval"], x["dist"]))
+    pares_ok = pares_ok[:TOP_N_PARES]
+
+    # ── salva resultados da janela ─────────────────────────────────────────
+    resumo_janelas.append({
+        "data_fim_janela":   data_fim,
+        "N_Ativos":          N,
+        "Candidatos_Dist":   len(candidatos),
+        "Pares_Cointegrados": len(pares_ok),
+        "Pregoes_Janela":    tot_preg,
+    })
+
+    for p in pares_ok:
+        a, b = p["a"], p["b"]
+        pares_por_janela.append({
+            "data_fim_janela": data_fim,
+            "Ativo_A":        a,           "Ativo_B":        b,
+            "Distancia":      round(p["dist"],       6),
+            "Correlacao":     round(p["corr"],       4),
+            "P_Value":        round(p["pval"],       6),
+            "Alpha_Kal":      round(p["alpha_final"],6),
+            "Beta_Kal_Final": round(p["beta_final"], 6),
+            "Beta_Kal_Media": round(p["beta_mean"],  6),
+            "Beta_Kal_Std":   round(p["beta_std"],   6),
+            "Z_Score_Atual":  round(p["z_final"],    4),
+            "Setor_A":        p["set_a"], "Setor_B":        p["set_b"],
+            "Subsetor_A":     p["sub_a"], "Subsetor_B":     p["sub_b"],
+            "Mesmo_Setor":    p["msm"],
         })
 
         key = (a, b) if a < b else (b, a)
         zscore_global[key] = {
-            "Ano_Formacao": ano,
-            "Alpha": alpha, "Beta": beta,
-            "Mu": mu_sp, "Sigma": sigma_sp,
-            "Correlacao": corr, "P_Value": pval,
-            "Z": pd.Series(zscore, index=precos.index, name=f"{a}__{b}"),
-            "S": pd.Series(spread,  index=precos.index, name=f"{a}__{b}"),
+            "data_fim_janela": data_fim,
+            "Alpha_Kal":      p["alpha_final"],
+            "Beta_Kal_Final": p["beta_final"],
+            "Beta_Kal_Media": p["beta_mean"],
+            "Beta_Kal_Std":   p["beta_std"],
+            "Correlacao":     p["corr"],
+            "P_Value":        p["pval"],
+            "Distancia":      p["dist"],
+            "Setor_A":        p["set_a"], "Setor_B": p["set_b"],
+            "Mesmo_Setor":    p["msm"],
+            "Z":              p["z_series"],      # Kalman z-score
+            "S":              p["spread_series"], # inovações brutas
+            "Beta_t":         p["beta_series"],   # beta dinâmico
         }
 
-    top3 = tickers[:3]
-    resumo_janelas.append({
-        "Ano": ano, "N_Ativos": len(tickers),
-        "Candidatos_Corr": len(candidatos),
-        "Pares_Cointegrados": len(pares_validos),
-        "Dias_Pregao": len(precos),
-        "Volume_Total_MM": top100["Vol_MM"].sum(),
-        "Top1": top3[0] if len(top3) > 0 else "",
-        "Top2": top3[1] if len(top3) > 1 else "",
-        "Top3": top3[2] if len(top3) > 2 else "",
-    })
-    print(f"      {ano}: {len(tickers):3d} ativos | "
-          f"{len(candidatos):4d} cand. | "
-          f"{len(pares_validos):3d} pares ADF | "
-          f"{time.time()-t_ano:.0f}s")
+    if (k + 1) % 12 == 0 or k == 0 or k == len(datas_fim) - 1:
+        print(f"      {data_fim.strftime('%Y-%m')} | "
+              f"{N:3d} ativos | {len(candidatos):4d} cand | "
+              f"{len(pares_ok):2d} pares | {time.time()-t_j:.1f}s")
+
+print(f"\n      {len(pares_por_janela)} pares-janela | "
+      f"{len(zscore_global)} pares únicos | "
+      f"{time.time()-t_pipe:.0f}s total pipeline\n")
 
 
-# 3. Consolidação e salvamento de CSVs
+# ─────────────────────────────────────────────────────────────────────────────
+#  5. CONSOLIDAÇÃO E CSVs
+# ─────────────────────────────────────────────────────────────────────────────
 
-print(f"\n[3/4] Consolidando e salvando CSVs...")
+n_steps = 5 if GERAR_GRAFICOS else 4
+print(f"[4/{n_steps}] Consolidando e salvando CSVs...")
 
-resumo_df    = pd.DataFrame(resumo_janelas)
-todos_top_df = pd.concat(todos_top100, ignore_index=True)
-pares_df     = pd.DataFrame(pares_por_ano)
+resumo_df = pd.DataFrame(resumo_janelas)
+pares_df  = pd.DataFrame(pares_por_janela)
 
-persistencia = (todos_top_df.groupby("Ativo")
-                .agg(Janelas=("Ano","count"),
-                     Rank_Medio=("Rank","mean"),
-                     Volume_Acum_MM=("Vol_MM","sum"))
-                .reset_index()
-                .sort_values(["Janelas","Rank_Medio"], ascending=[False,True]))
-
-freq_pares = (pares_df.groupby(["Ativo_A","Ativo_B"])
-              .agg(N_Anos=("Ano","count"),
-                   P_Value_Min=("P_Value","min"),
-                   P_Value_Med=("P_Value","mean"),
-                   Corr_Med=("Correlacao", lambda x: x.abs().mean()))
+freq_pares = (pares_df.groupby(["Ativo_A", "Ativo_B"])
+              .agg(N_Janelas      =("data_fim_janela", "count"),
+                   P_Value_Min    =("P_Value",         "min"),
+                   P_Value_Med    =("P_Value",         "mean"),
+                   Dist_Med       =("Distancia",       "mean"),
+                   Corr_Med       =("Correlacao",      lambda x: x.abs().mean()),
+                   Beta_Kal_Medio =("Beta_Kal_Media",  "mean"),
+                   Beta_Kal_Std   =("Beta_Kal_Std",    "mean"),
+                   Mesmo_Setor    =("Mesmo_Setor",     "first"),
+                   Setor_A        =("Setor_A",         "first"),
+                   Setor_B        =("Setor_B",         "first"))
               .reset_index()
-              .sort_values(["N_Anos","P_Value_Min"], ascending=[False,True]))
+              .sort_values(["N_Janelas", "P_Value_Min"],
+                           ascending=[False, True]))
 
 melhores = (pares_df.sort_values("P_Value")
-            .drop_duplicates(subset=["Ativo_A","Ativo_B"])
+            .drop_duplicates(subset=["Ativo_A", "Ativo_B"])
             .reset_index(drop=True))
 
-# Z-scores wide (ultimo periodo de formacao de cada par)
-z_wide = pd.DataFrame({f"{a}__{b}": v["Z"]
-                        for (a, b), v in zscore_global.items()}).sort_index()
+ativ_a = pares_df[["data_fim_janela","Ativo_A"]].rename(
+             columns={"Ativo_A": "Ativo"})
+ativ_b = pares_df[["data_fim_janela","Ativo_B"]].rename(
+             columns={"Ativo_B": "Ativo"})
+persistencia = (pd.concat([ativ_a, ativ_b])
+                .drop_duplicates()
+                .groupby("Ativo")["data_fim_janela"]
+                .count().reset_index(name="N_Janelas")
+                .sort_values("N_Janelas", ascending=False))
 
-csvs = {
-    "resumo_janelas.csv":     resumo_df,
-    "pares_por_ano.csv":      pares_df,
-    "pares_frequentes.csv":   freq_pares,
-    "melhores_pares.csv":     melhores,
+# z-score Kalman wide (último período de formação de cada par)
+z_wide = (pd.DataFrame({f"{a}__{b}": v["Z"]
+                         for (a, b), v in zscore_global.items()})
+            .sort_index())
+
+for nome, df_out in {
+    "resumo_janelas.csv":      resumo_df,
+    "pares_por_janela.csv":    pares_df,
+    "pares_frequentes.csv":    freq_pares,
+    "melhores_pares.csv":      melhores,
     "persistencia_ativos.csv": persistencia,
-    "zscores.csv":            z_wide,
-}
-for nome, df in csvs.items():
-    df.to_csv(os.path.join(OUTPUT_DIR, nome), index=(nome == "zscores.csv"))
+    "zscores_kalman.csv":      z_wide,
+}.items():
+    df_out.to_csv(os.path.join(OUTPUT_DIR, nome),
+                  index=(nome == "zscores_kalman.csv"))
 
-print(f"      {len(pares_df)} registros | "
-      f"{freq_pares.shape[0]} pares unicos | "
-      f"{len(zscore_global)} series de z-score")
-print(f"      CSVs salvos em: output/")
+print(f"      {len(pares_df)} pares-janela | "
+      f"{len(freq_pares)} únicos | "
+      f"{len(zscore_global)} séries z-score Kalman")
+print(f"      CSVs em: output/")
 
+if not GERAR_GRAFICOS:
+    print("\n  [info] GERAR_GRAFICOS=False — pulando gráficos.")
+else:
 
-# 4. Geração de gráficos
+    # ─────────────────────────────────────────────────────────────────────────
+    #  6. GRÁFICOS
+    # ─────────────────────────────────────────────────────────────────────────
 
-print(f"\n[4/4] Gerando graficos...")
+    print(f"\n[5/{n_steps}] Gerando gráficos...")
 
-def salvar(fig, nome):
-    path = os.path.join(CHARTS_DIR, nome)
-    fig.savefig(path, dpi=150, bbox_inches="tight")
+    def _salvar(fig, nome):
+        fig.savefig(os.path.join(CHARTS_DIR, nome),
+                    dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"      {nome}")
+
+    pares_z = sorted(zscore_global.items(), key=lambda x: x[1]["P_Value"])
+    pares_df["Ano"] = pd.DatetimeIndex(pares_df["data_fim_janela"]).year
+    resumo_df["Ano"] = pd.DatetimeIndex(resumo_df["data_fim_janela"]).year
+
+    res_ano = resumo_df.groupby("Ano").agg(
+        Candidatos_Dist    =("Candidatos_Dist",    "mean"),
+        Pares_Cointegrados =("Pares_Cointegrados", "sum"),
+        N_Ativos           =("N_Ativos",           "mean"),
+    ).reset_index()
+
+    # G1 — overview anual
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
+    fig.suptitle(f"Overview Anual — Janelas de {JANELA_FORMACAO} Pregões + Kalman",
+                 fontsize=13, fontweight="bold")
+    axes[0].bar(res_ano["Ano"].astype(str), res_ano["N_Ativos"],
+                color=C["azul2"], edgecolor="white")
+    axes[0].set_title("Média Ativos Líquidos/Janela")
+    axes[0].set_ylabel("N ativos")
+    axes[1].bar(res_ano["Ano"].astype(str), res_ano["Candidatos_Dist"],
+                color=C["azul2"], edgecolor="white", alpha=0.4,
+                label=f"Cand. dist. (top-{MAX_CAND_DIST})")
+    axes[1].bar(res_ano["Ano"].astype(str), res_ano["Pares_Cointegrados"],
+                color=C["verde"], edgecolor="white",
+                label=f"Cointegrados (p<{PVALUE_MAX})")
+    axes[1].set_title("Candidatos vs Pares Cointegrados")
+    axes[1].set_ylabel("N pares"); axes[1].legend()
+    msm_pct = (pares_df.groupby("Ano")["Mesmo_Setor"].mean() * 100
+               ).reindex(res_ano["Ano"])
+    axes[2].bar(msm_pct.index.astype(str), msm_pct.values,
+                color=C["roxo"], edgecolor="white", alpha=0.85)
+    axes[2].axhline(msm_pct.mean(), linestyle="--", color=C["laran"],
+                    linewidth=1.5, label=f"Média: {msm_pct.mean():.0f}%")
+    axes[2].set_title("% Pares Mesmo Setor")
+    axes[2].set_ylabel("%"); axes[2].set_ylim(0, 100); axes[2].legend()
+    plt.tight_layout()
+    _salvar(fig, "01_overview_anual.png")
+
+    # G2 — persistência dos ativos
+    top30 = persistencia.head(30)
+    n_tot = resumo_df["data_fim_janela"].nunique()
+    cbs   = [C["verde"] if j >= n_tot * 0.8 else C["azul2"] if j >= n_tot * 0.5
+             else C["amar"] if j >= n_tot * 0.3 else C["cinza"]
+             for j in top30["N_Janelas"]]
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.barh(top30["Ativo"][::-1], top30["N_Janelas"][::-1],
+            color=list(reversed(cbs)), edgecolor="white", linewidth=0.6)
+    ax.axvline(n_tot, linestyle="--", color=C["verm"], linewidth=1.3,
+               label=f"Total: {n_tot} janelas")
+    ax.set_xlabel("Janelas mensais com presença em algum par")
+    ax.set_title("Persistência dos Ativos nos Pares", fontweight="bold")
+    for v, yp in zip(top30["N_Janelas"][::-1], range(len(top30))):
+        ax.text(v + 0.3, yp, str(v), va="center", fontsize=8.5)
+    patches = [mpatches.Patch(color=C["verde"], label="≥80% janelas"),
+               mpatches.Patch(color=C["azul2"], label="≥50%"),
+               mpatches.Patch(color=C["amar"],  label="≥30%"),
+               mpatches.Patch(color=C["cinza"], label="<30%")]
+    ax.legend(handles=patches, loc="lower right")
+    plt.tight_layout()
+    _salvar(fig, "02_persistencia_ativos.png")
+
+    # G3 — pares por janela mensal
+    fig, axes = plt.subplots(2, 1, figsize=(16, 8), sharex=True)
+    fig.suptitle("Pares Cointegrados por Janela Mensal",
+                 fontsize=13, fontweight="bold")
+    axes[0].fill_between(resumo_df["data_fim_janela"],
+                         resumo_df["Pares_Cointegrados"],
+                         alpha=0.4, color=C["verde"])
+    axes[0].plot(resumo_df["data_fim_janela"],
+                 resumo_df["Pares_Cointegrados"],
+                 color=C["verde"], linewidth=1.2)
+    axes[0].axhline(resumo_df["Pares_Cointegrados"].mean(), linestyle="--",
+                    color=C["laran"], linewidth=1.5,
+                    label=f"Média: {resumo_df['Pares_Cointegrados'].mean():.1f}")
+    axes[0].set_ylabel("Pares cointegrados"); axes[0].legend()
+    axes[1].plot(resumo_df["data_fim_janela"], resumo_df["N_Ativos"],
+                 color=C["azul2"], linewidth=1.2)
+    axes[1].fill_between(resumo_df["data_fim_janela"],
+                         resumo_df["N_Ativos"], alpha=0.3, color=C["azul2"])
+    axes[1].set_ylabel("Ativos líquidos")
+    axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    axes[1].xaxis.set_major_locator(mdates.YearLocator())
+    plt.tight_layout()
+    _salvar(fig, "03_pares_por_janela.png")
+
+    # G4 — ranking de pares
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    fig.suptitle("Ranking dos Pares — Frequência e Força",
+                 fontweight="bold", fontsize=13)
+    top_freq = freq_pares.head(20).copy()
+    top_freq["Par"] = top_freq["Ativo_A"] + " × " + top_freq["Ativo_B"]
+    max_jan = freq_pares["N_Janelas"].max()
+    cbs_f   = [C["verde"] if n >= max_jan * 0.8 else C["azul2"] if n >= max_jan * 0.5
+               else C["amar"] for n in top_freq["N_Janelas"]]
+    axes[0].barh(top_freq["Par"][::-1], top_freq["N_Janelas"][::-1],
+                 color=list(reversed(cbs_f)), edgecolor="white")
+    axes[0].set_xlabel("Janelas cointegrado")
+    axes[0].set_title("Top 20 — Mais Frequentes")
+    for v, yp in zip(top_freq["N_Janelas"][::-1], range(len(top_freq))):
+        axes[0].text(v + 0.1, yp, str(v), va="center", fontsize=8.5)
+    top_forte = melhores.head(20).copy()
+    top_forte["Par"] = top_forte["Ativo_A"] + " × " + top_forte["Ativo_B"]
+    cbs_s = [C["verde"] if pv <= 0.01 else C["azul2"] if pv <= 0.03
+             else C["amar"] for pv in top_forte["P_Value"]]
+    axes[1].barh(top_forte["Par"][::-1],
+                 top_forte["Correlacao"].abs()[::-1],
+                 color=list(reversed(cbs_s)), edgecolor="white")
+    axes[1].set_xlim(0.75, 1.02)
+    axes[1].set_xlabel("|Correlação|")
+    axes[1].set_title("Top 20 — Menor P-value")
+    for i, (_, row) in enumerate(top_forte[::-1].iterrows()):
+        axes[1].text(abs(row["Correlacao"]) + 0.002, i,
+                     f"p={row['P_Value']:.4f}", va="center",
+                     fontsize=7.5, color=C["azul"])
+    plt.tight_layout()
+    _salvar(fig, "04_pares_ranking.png")
+
+    # G5 — beta dinâmico (Kalman) — TOP 4 PARES
+    top4 = pares_z[:4]
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig.suptitle(
+        f"Beta Dinâmico (Kalman Filter) — Top 4 Pares\n"
+        f"δ={KALMAN_DELTA:.0e}  |  warm-start={KALMAN_N_WARM} obs",
+        fontsize=13, fontweight="bold")
+    for i, ((at, bt), info) in enumerate(top4):
+        ax   = axes.flatten()[i]
+        beta = info["Beta_t"].dropna()
+        ax.plot(beta.index, beta.values,
+                color=C["azul2"], linewidth=1.0, label="β(t)")
+        bm = beta.mean(); bs = beta.std()
+        ax.axhline(bm, linestyle="--", color=C["cinza"],
+                   linewidth=1.2, label=f"Média={bm:.3f}")
+        ax.axhline(bm + bs, linestyle=":", color=C["laran"],
+                   linewidth=0.9, label=f"±1σ={bs:.3f}")
+        ax.axhline(bm - bs, linestyle=":", color=C["laran"], linewidth=0.9)
+        ax.fill_between(beta.index, bm - bs, bm + bs,
+                        alpha=0.10, color=C["laran"])
+        setor_tag = f" [{info['Setor_A']}]" if info.get("Setor_A") else ""
+        ax.set_title(
+            f"{at} × {bt}{setor_tag}\n"
+            f"p={info['P_Value']:.4f}  dist={info['Distancia']:.3f}  "
+            f"β_final={info['Beta_Kal_Final']:.3f}  "
+            f"({pd.Timestamp(info['data_fim_janela']).strftime('%Y-%m')})",
+            fontsize=9, fontweight="bold")
+        ax.set_ylabel("β dinâmico (hedge ratio)")
+        ax.legend(fontsize=8)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        ax.xaxis.set_major_locator(mdates.YearLocator())
+    plt.tight_layout()
+    _salvar(fig, "05_beta_dinamico_kalman.png")
+
+    # G6 — z-score Kalman top 6 pares
+    top6 = pares_z[:6]
+    fig, axes = plt.subplots(3, 2, figsize=(16, 13))
+    fig.suptitle("Z-Score Kalman — Top 6 Pares (menor p-value)\n"
+                 "Vermelho: SHORT (+2σ) | Verde: LONG (-2σ)",
+                 fontsize=13, fontweight="bold")
+    for i, ((at, bt), info) in enumerate(top6):
+        ax  = axes.flatten()[i]
+        z   = info["Z"].dropna()
+        nl  = (z <= -2).sum(); ns = (z >= 2).sum()
+        pct = (nl + ns) / len(z) * 100
+        ax.plot(z.index, z.values, color=C["azul2"],
+                linewidth=0.85, alpha=0.9)
+        for lvl, col, ls in [(2, C["verm"], "--"), (-2, C["verde"], "--"),
+                              (3, C["verm"], ":"),  (-3, C["verde"], ":"),
+                              (0, C["cinza"], "-")]:
+            ax.axhline(lvl, linestyle=ls, color=col,
+                       linewidth=1.2 if abs(lvl) == 2 else 0.8, alpha=0.85)
+        ax.fill_between(z.index, 2,  z.values,
+                        where=(z.values >= 2),  alpha=0.2, color=C["verm"])
+        ax.fill_between(z.index, -2, z.values,
+                        where=(z.values <= -2), alpha=0.2, color=C["verde"])
+        setor_tag = f" [{info['Setor_A']}]" if info.get("Setor_A") else ""
+        ax.set_title(
+            f"{at} × {bt}{setor_tag}\n"
+            f"|r|={abs(info['Correlacao']):.3f}  "
+            f"p={info['P_Value']:.4f}  "
+            f"β_final={info['Beta_Kal_Final']:.3f}  "
+            f"({pd.Timestamp(info['data_fim_janela']).strftime('%Y-%m')})\n"
+            f"LONG:{nl}d  SHORT:{ns}d  {pct:.1f}% ativo",
+            fontsize=9, fontweight="bold")
+        ax.set_ylabel("Z-Score (Kalman)"); ax.set_ylim(-5, 5)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        ax.xaxis.set_major_locator(mdates.YearLocator())
+        ax.text(z.index[-1], 2.1,  "+2σ", color=C["verm"],  fontsize=8)
+        ax.text(z.index[-1], -2.4, "-2σ", color=C["verde"], fontsize=8)
+    plt.tight_layout()
+    _salvar(fig, "06_zscore_kalman_top6.png")
+
+    # G7 — spread bruto (inovações Kalman) top 4
+    top4 = pares_z[:4]
+    fig, axes = plt.subplots(2, 2, figsize=(16, 9))
+    fig.suptitle("Spread Kalman (Inovações) — Top 4 Pares",
+                 fontsize=13, fontweight="bold")
+    for i, ((at, bt), info) in enumerate(top4):
+        ax = axes.flatten()[i]
+        s  = info["S"].dropna()
+        mu = s.mean(); sig = s.std()
+        ax.plot(s.index, s.values, color=C["azul2"],
+                linewidth=0.8, alpha=0.9)
+        ax.axhline(mu, linestyle="-", color=C["cinza"],
+                   linewidth=1.2, label=f"μ={mu:.4f}")
+        ax.axhline(mu + 2 * sig, linestyle="--", color=C["verm"],
+                   linewidth=1.2, label="+2σ")
+        ax.axhline(mu - 2 * sig, linestyle="--", color=C["verde"],
+                   linewidth=1.2, label="-2σ")
+        ax.fill_between(s.index, mu + 2 * sig, s.values,
+                        where=(s.values >= mu + 2 * sig),
+                        alpha=0.2, color=C["verm"])
+        ax.fill_between(s.index, mu - 2 * sig, s.values,
+                        where=(s.values <= mu - 2 * sig),
+                        alpha=0.2, color=C["verde"])
+        ax.set_title(f"Spread: {at} × {bt}  "
+                     f"(β_med={info['Beta_Kal_Media']:.3f}  "
+                     f"β_std={info['Beta_Kal_Std']:.3f})",
+                     fontweight="bold", fontsize=10)
+        ax.set_ylabel("Inovação Kalman (log)"); ax.legend(fontsize=8)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        ax.xaxis.set_major_locator(mdates.YearLocator())
+    plt.tight_layout()
+    _salvar(fig, "07_spread_kalman_top4.png")
+
+    # G8 — par destaque (melhor p-value)
+    (ad, bd), id_ = pares_z[0]
+    zd = id_["Z"].dropna()
+    sd = id_["S"].dropna()
+    bd_t = id_["Beta_t"].dropna()
+
+    fig = plt.figure(figsize=(15, 12))
+    fig.suptitle(
+        f"Par Destaque: {ad} × {bd}\n"
+        f"|r|={abs(id_['Correlacao']):.4f}  "
+        f"p={id_['P_Value']:.4f}  "
+        f"β_final={id_['Beta_Kal_Final']:.3f}  "
+        f"δ={KALMAN_DELTA:.0e}  "
+        f"janela: {pd.Timestamp(id_['data_fim_janela']).strftime('%Y-%m')}",
+        fontsize=12, fontweight="bold")
+    gs = GridSpec(4, 1, hspace=0.5, figure=fig)
+
+    ax1 = fig.add_subplot(gs[0])
+    ax1.plot(sd.index, sd.values, color=C["azul2"], linewidth=0.9)
+    mu_d = sd.mean(); sg_d = sd.std()
+    ax1.axhline(mu_d, linestyle="--", color=C["cinza"], linewidth=1)
+    ax1.fill_between(sd.index, mu_d + 2 * sg_d, sd.values,
+                     where=(sd.values >= mu_d + 2 * sg_d),
+                     alpha=0.2, color=C["verm"])
+    ax1.fill_between(sd.index, mu_d - 2 * sg_d, sd.values,
+                     where=(sd.values <= mu_d - 2 * sg_d),
+                     alpha=0.2, color=C["verde"])
+    ax1.set_ylabel("Spread (inovação)")
+    ax1.set_title("Inovações Kalman (spread dinâmico)")
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax1.xaxis.set_major_locator(mdates.YearLocator())
+
+    ax2 = fig.add_subplot(gs[1])
+    ax2.plot(bd_t.index, bd_t.values, color=C["roxo"], linewidth=1.0)
+    bm = bd_t.mean(); bs = bd_t.std()
+    ax2.axhline(bm, linestyle="--", color=C["cinza"], linewidth=1,
+                label=f"Média β={bm:.3f}")
+    ax2.fill_between(bd_t.index, bm - bs, bm + bs,
+                     alpha=0.15, color=C["roxo"])
+    ax2.set_ylabel("β dinâmico")
+    ax2.set_title(f"Hedge Ratio Dinâmico (Kalman)  ±1σ={bs:.3f}")
+    ax2.legend(fontsize=9)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax2.xaxis.set_major_locator(mdates.YearLocator())
+
+    ax3 = fig.add_subplot(gs[2])
+    ax3.plot(zd.index, zd.values, color=C["azul"], linewidth=0.9, alpha=0.9)
+    for lvl, col, ls in [(2, C["verm"], "--"), (-2, C["verde"], "--"),
+                          (3, C["verm"], ":"),  (-3, C["verde"], ":"),
+                          (0, C["cinza"], "-")]:
+        ax3.axhline(lvl, linestyle=ls, color=col,
+                    linewidth=1.2 if abs(lvl) <= 2 else 0.9)
+    ax3.fill_between(zd.index, 2,  zd.values,
+                     where=(zd.values >= 2),  alpha=0.2, color=C["verm"])
+    ax3.fill_between(zd.index, -2, zd.values,
+                     where=(zd.values <= -2), alpha=0.2, color=C["verde"])
+    nl = (zd <= -2).sum(); ns = (zd >= 2).sum()
+    ax3.set_ylabel("Z-Score"); ax3.set_ylim(-5, 5)
+    ax3.set_title(f"Z-Score Kalman — LONG:{nl}d  SHORT:{ns}d")
+    ax3.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax3.xaxis.set_major_locator(mdates.YearLocator())
+
+    ax4 = fig.add_subplot(gs[3])
+    zr  = zd[zd.index >= pd.Timestamp("2024-01-01")]
+    ax4.plot(zr.index, zr.values, color=C["azul"], linewidth=1.2)
+    for lvl, col, ls in [(2, C["verm"], "--"), (-2, C["verde"], "--"),
+                          (0, C["cinza"], "-")]:
+        ax4.axhline(lvl, linestyle=ls, color=col, linewidth=1.2)
+    ax4.fill_between(zr.index, 2,  zr.values,
+                     where=(zr.values >= 2),  alpha=0.25, color=C["verm"])
+    ax4.fill_between(zr.index, -2, zr.values,
+                     where=(zr.values <= -2), alpha=0.25, color=C["verde"])
+    ax4.set_ylabel("Z-Score"); ax4.set_ylim(-4, 4)
+    ax4.set_title(
+        f"Detalhe 2024–atual  |  Z atual={zd.iloc[-1]:+.2f}  "
+        f"β atual={bd_t.iloc[-1]:.3f}  ({zd.index[-1].date()})")
+    ax4.xaxis.set_major_formatter(mdates.DateFormatter("%b/%Y"))
+    ax4.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+
+    plt.savefig(os.path.join(CHARTS_DIR, "08_par_destaque_kalman.png"),
+                dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"      {nome}")
-
-
-# G1: universo anual
-df_p = resumo_df.copy()
-df_p["Vol_BI"] = df_p["Volume_Total_MM"] / 1_000
-
-fig, axes = plt.subplots(1, 3, figsize=(17, 5))
-fig.suptitle("Universo Anual — Top 100 Ativos B3 por Volume",
-             fontsize=13, fontweight="bold")
-
-ax = axes[0]
-bars = ax.bar(df_p["Ano"].astype(str), df_p["Vol_BI"],
-              color=C["azul2"], edgecolor="white", linewidth=0.8, zorder=3)
-for bar, v in zip(bars, df_p["Vol_BI"]):
-    ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.03,
-            f"R${v:.0f}Bi", ha="center", fontsize=7.5,
-            fontweight="bold", color=C["azul"])
-coef = np.polyfit(range(len(df_p)), df_p["Vol_BI"].values, 2)
-ax.plot(df_p["Ano"].astype(str),
-        np.polyval(coef, range(len(df_p))),
-        "--", color=C["laran"], linewidth=2, label="Tendencia")
-ax.set_title("Volume Total Anual (R$ Bilhoes)")
-ax.set_ylabel("R$ Bilhoes"); ax.legend()
-ax.set_ylim(0, df_p["Vol_BI"].max()*1.15)
-
-ax2 = axes[1]
-ax2.bar(df_p["Ano"].astype(str), df_p["Candidatos_Corr"],
-        color=C["azul2"], edgecolor="white", alpha=0.4, zorder=2,
-        label=f"Cand. corr. (>={CORR_MIN})")
-ax2.bar(df_p["Ano"].astype(str), df_p["Pares_Cointegrados"],
-        color=C["verde"], edgecolor="white", zorder=3,
-        label=f"Cointegrados (p<{PVALUE_MAX})")
-for bar, v in zip(ax2.patches[len(df_p):], df_p["Pares_Cointegrados"]):
-    if v > 0:
-        ax2.text(bar.get_x()+bar.get_width()/2, bar.get_height()+1,
-                 str(v), ha="center", fontsize=8,
-                 fontweight="bold", color=C["verde"])
-ax2.set_title("Candidatos vs Pares Cointegrados por Ano")
-ax2.set_ylabel("N de pares"); ax2.legend()
-
-ax3 = axes[2]
-ax3.bar(df_p["Ano"].astype(str), df_p["Dias_Pregao"],
-        color=C["roxo"], edgecolor="white", alpha=0.85, zorder=3)
-ax3.axhline(df_p["Dias_Pregao"].mean(), linestyle="--", color=C["laran"],
-            linewidth=1.5, label=f"Media: {df_p['Dias_Pregao'].mean():.0f}d/ano")
-ax3.set_title("Dias de Pregao por Ano")
-ax3.set_ylabel("Pregoes"); ax3.set_ylim(150, 260); ax3.legend()
-
-plt.tight_layout()
-salvar(fig, "01_universo_anual.png")
-
-
-# G2: persistência dos ativos────
-n_tot  = len(anos)
-top30  = persistencia.head(30)
-cbs    = [C["verde"] if j == n_tot else C["azul2"] if j >= n_tot-2
-          else C["amar"] if j >= n_tot-4 else C["cinza"]
-          for j in top30["Janelas"]]
-
-fig, ax = plt.subplots(figsize=(12, 8))
-ax.barh(top30["Ativo"][::-1], top30["Janelas"][::-1],
-        color=list(reversed(cbs)), edgecolor="white", linewidth=0.6)
-ax.axvline(n_tot, linestyle="--", color=C["verm"], linewidth=1.3,
-           label=f"Max: {n_tot} janelas")
-ax.set_xlim(0, n_tot+2)
-ax.set_xlabel(f"Anos no Top {TOP_N} (de {n_tot} possiveis)")
-ax.set_title(f"Persistencia dos Ativos no Top {TOP_N} por Volume\n"
-             f"{ANO_INICIO}-{ANO_FIM}  |  Verde=todas as janelas",
-             fontweight="bold")
-for v, yp in zip(top30["Janelas"][::-1], range(len(top30))):
-    ax.text(v+0.1, yp, str(v), va="center", fontsize=8.5)
-patches = [mpatches.Patch(color=C["verde"],  label=f"Todas ({n_tot})"),
-           mpatches.Patch(color=C["azul2"], label=f">{n_tot-3}"),
-           mpatches.Patch(color=C["amar"],  label=f">{n_tot-5}"),
-           mpatches.Patch(color=C["cinza"], label="demais")]
-ax.legend(handles=patches, loc="lower right")
-plt.tight_layout()
-salvar(fig, "02_persistencia_ativos.png")
-
-
-# G3: análise dos pares cointegrados
-fig, axes = plt.subplots(1, 3, figsize=(17, 5))
-fig.suptitle(f"Analise de Cointegração — {len(pares_df)} pares-janela | "
-             f"{freq_pares.shape[0]} pares unicos",
-             fontsize=13, fontweight="bold")
-
-ax = axes[0]
-ax.hist(pares_df["P_Value"], bins=20, color=C["azul2"], edgecolor="white")
-ax.axvline(PVALUE_MAX, linestyle="--", color=C["verm"], linewidth=1.5,
-           label=f"p={PVALUE_MAX}")
-ax.set_title("Distribuicao P-values ADF")
-ax.set_xlabel("P-value"); ax.set_ylabel("Frequencia"); ax.legend()
-
-ax2 = axes[1]
-sc = ax2.scatter(pares_df["Correlacao"].abs(), pares_df["P_Value"],
-                 c=pares_df["P_Value"], cmap="RdYlGn_r",
-                 alpha=0.5, s=25, edgecolors="none",
-                 vmin=0, vmax=PVALUE_MAX)
-plt.colorbar(sc, ax=ax2, label="P-value")
-ax2.axhline(PVALUE_MAX, linestyle="--", color=C["verm"], linewidth=1.2)
-ax2.set_title("|Correlacao| vs P-value")
-ax2.set_xlabel("|Correlacao|"); ax2.set_ylabel("P-value ADF")
-
-ax3 = axes[2]
-serie_ano = pares_df.groupby("Ano")["Ativo_A"].count()
-ax3.bar(serie_ano.index.astype(str), serie_ano.values,
-        color=C["verde"], edgecolor="white")
-ax3.axhline(serie_ano.mean(), linestyle="--", color=C["laran"],
-            linewidth=1.5, label=f"Media: {serie_ano.mean():.0f}/ano")
-ax3.set_title("Pares Cointegrados por Ano")
-ax3.set_ylabel("N de pares"); ax3.legend()
-
-plt.tight_layout()
-salvar(fig, "03_pares_cointegrados.png")
-
-
-# G4: ranking de pares
-fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-fig.suptitle("Ranking dos Pares — Frequencia e Forca Estatistica",
-             fontweight="bold", fontsize=13)
-
-top_freq = freq_pares.head(20).copy()
-top_freq["Par"] = top_freq["Ativo_A"] + " x " + top_freq["Ativo_B"]
-cbs_f = [C["verde"] if n == n_tot else C["azul2"] if n >= n_tot-2
-         else C["amar"] for n in top_freq["N_Anos"]]
-
-ax = axes[0]
-ax.barh(top_freq["Par"][::-1], top_freq["N_Anos"][::-1],
-        color=list(reversed(cbs_f)), edgecolor="white")
-ax.set_xlim(0, n_tot+1)
-ax.set_xlabel("Janelas em que o par foi cointegrado")
-ax.set_title(f"Top 20 — Mais Frequentes (max={n_tot} janelas)")
-for v, yp in zip(top_freq["N_Anos"][::-1], range(len(top_freq))):
-    ax.text(v+0.05, yp, str(v), va="center", fontsize=8.5)
-
-top_forte = melhores.head(20).copy()
-top_forte["Par"] = top_forte["Ativo_A"] + " x " + top_forte["Ativo_B"]
-cbs_s = [C["verde"] if p <= 0.01 else C["azul2"] if p <= 0.03
-         else C["amar"] for p in top_forte["P_Value"]]
-
-ax2 = axes[1]
-ax2.barh(top_forte["Par"][::-1], top_forte["Correlacao"].abs()[::-1],
-         color=list(reversed(cbs_s)), edgecolor="white")
-ax2.set_xlim(0.75, 1.02)
-ax2.set_xlabel("|Correlacao|")
-ax2.set_title("Top 20 — Menor P-value ADF\n"
-              "Verde: p<0.01 | Azul: p<0.03 | Amarelo: p<0.05")
-for i, (_, row) in enumerate(top_forte[::-1].iterrows()):
-    ax2.text(abs(row["Correlacao"])+0.002, i,
-             f"p={row['P_Value']:.4f}", va="center",
-             fontsize=7.5, color=C["azul"])
-
-plt.tight_layout()
-salvar(fig, "04_pares_ranking.png")
-
-
-# G5: parâmetros OLS
-fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-fig.suptitle("Parametros OLS — log(A) = alpha + beta*log(B)",
-             fontsize=13, fontweight="bold")
-
-ax = axes[0]
-ax.hist(pares_df["Beta"], bins=25, color=C["verde"], edgecolor="white")
-ax.axvline(1.0, linestyle="--", color=C["laran"], linewidth=1.5, label="beta=1")
-ax.axvline(pares_df["Beta"].median(), linestyle="-", color=C["azul"],
-           linewidth=1.5, label=f"Mediana={pares_df['Beta'].median():.2f}")
-ax.set_title("Hedge Ratio (beta)"); ax.legend()
-
-ax2 = axes[1]
-ax2.hist(pares_df["Spread_Sigma"], bins=25, color=C["laran"], edgecolor="white")
-ax2.axvline(pares_df["Spread_Sigma"].mean(), linestyle="--", color=C["azul"],
-            linewidth=1.5,
-            label=f"Media={pares_df['Spread_Sigma'].mean():.3f}")
-ax2.set_title("Desvio-Padrao do Spread (sigma)"); ax2.legend()
-
-ax3 = axes[2]
-anos_bp  = sorted(pares_df["Ano"].unique())
-data_bp  = [pares_df[pares_df["Ano"]==a]["Beta"].values for a in anos_bp]
-bp = ax3.boxplot(data_bp, labels=[str(a) for a in anos_bp], patch_artist=True)
-for patch in bp["boxes"]:
-    patch.set_facecolor(C["azul2"]); patch.set_alpha(0.7)
-ax3.axhline(1.0, linestyle="--", color=C["laran"], linewidth=1.2, label="beta=1")
-ax3.set_title("Beta por Ano"); ax3.legend()
-plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45, ha="right")
-
-plt.tight_layout()
-salvar(fig, "05_parametros_ols.png")
-
-
-# G6: z-score dos top 6 pares
-pares_z = sorted(zscore_global.items(), key=lambda x: x[1]["P_Value"])
-top6    = pares_z[:6]
-
-fig, axes = plt.subplots(3, 2, figsize=(16, 13))
-fig.suptitle("Z-Score — Top 6 Pares (menor p-value ADF)\n"
-             "Vermelho: SHORT (+2s) | Verde: LONG (-2s)",
-             fontsize=13, fontweight="bold")
-axes = axes.flatten()
-
-for i, ((at, bt), info) in enumerate(top6):
-    ax  = axes[i]
-    z   = info["Z"].dropna()
-    nl  = (z <= -2).sum(); ns = (z >= 2).sum()
-    pct = (nl+ns)/len(z)*100
-
-    ax.plot(z.index, z.values, color=C["azul2"], linewidth=0.85, alpha=0.9)
-    for lvl, col, ls in [(2,C["verm"],"--"),(-2,C["verde"],"--"),
-                          (3,C["verm"],":"  ),(-3,C["verde"],":"),
-                          (0,C["cinza"],"-")]:
-        ax.axhline(lvl, linestyle=ls, color=col,
-                   linewidth=1.2 if abs(lvl)==2 else 0.8, alpha=0.85)
-    ax.fill_between(z.index, 2,  z.values, where=(z.values>=2),
-                    alpha=0.2, color=C["verm"])
-    ax.fill_between(z.index, -2, z.values, where=(z.values<=-2),
-                    alpha=0.2, color=C["verde"])
-    ax.set_title(
-        f"{at} x {bt}  |r|={abs(info['Correlacao']):.3f}  "
-        f"p={info['P_Value']:.4f}  (formado {info['Ano_Formacao']})\n"
-        f"LONG: {nl}d | SHORT: {ns}d | {pct:.1f}% do tempo ativo",
-        fontsize=9.5, fontweight="bold")
-    ax.set_ylabel("Z-Score"); ax.set_ylim(-5, 5)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-    ax.xaxis.set_major_locator(mdates.YearLocator())
-    ax.text(z.index[-1], 2.1,  "+2s", color=C["verm"],  fontsize=8)
-    ax.text(z.index[-1], -2.4, "-2s", color=C["verde"], fontsize=8)
-
-plt.tight_layout()
-salvar(fig, "06_zscore_top6.png")
-
-
-# G7: spread bruto dos top 4 pares
-top4 = pares_z[:4]
-
-fig, axes = plt.subplots(2, 2, figsize=(16, 9))
-fig.suptitle("Spread Bruto (log-precos) — Top 4 Pares\n"
-             "Spread = log(A) - alpha - beta*log(B)",
-             fontsize=13, fontweight="bold")
-axes = axes.flatten()
-
-for i, ((at, bt), info) in enumerate(top4):
-    ax  = axes[i]
-    s   = info["S"].dropna()
-    mu  = s.mean(); sig = s.std()
-    ax.plot(s.index, s.values, color=C["azul2"], linewidth=0.8, alpha=0.9)
-    ax.axhline(mu,         linestyle="-",  color=C["cinza"], linewidth=1.2,
-               label=f"mu={mu:.4f}")
-    ax.axhline(mu+2*sig,   linestyle="--", color=C["verm"],  linewidth=1.2,
-               label=f"+2s={mu+2*sig:.4f}")
-    ax.axhline(mu-2*sig,   linestyle="--", color=C["verde"], linewidth=1.2,
-               label=f"-2s={mu-2*sig:.4f}")
-    ax.fill_between(s.index, mu+2*sig, s.values,
-                    where=(s.values>=mu+2*sig), alpha=0.2, color=C["verm"])
-    ax.fill_between(s.index, mu-2*sig, s.values,
-                    where=(s.values<=mu-2*sig), alpha=0.2, color=C["verde"])
-    ax.set_title(f"Spread: {at} x {bt}  "
-                 f"(sigma={sig:.4f} | formado {info['Ano_Formacao']})",
-                 fontweight="bold", fontsize=10)
-    ax.set_ylabel("Spread (log)"); ax.legend(fontsize=8)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-    ax.xaxis.set_major_locator(mdates.YearLocator())
-
-plt.tight_layout()
-salvar(fig, "07_spread_top4.png")
-
-
-# G8: par destaque (melhor p-value)
-(ad, bd), id_ = pares_z[0]
-zd = id_["Z"].dropna()
-sd = id_["S"].dropna()
-
-fig = plt.figure(figsize=(15, 9))
-fig.suptitle(
-    f"Par Destaque: {ad} x {bd}\n"
-    f"|r|={abs(id_['Correlacao']):.4f}  p={id_['P_Value']:.4f}  "
-    f"beta={id_['Beta']:.3f}  formado em {id_['Ano_Formacao']}",
-    fontsize=12, fontweight="bold")
-gs = GridSpec(3, 1, hspace=0.45, figure=fig)
-
-ax1 = fig.add_subplot(gs[0])
-mu_d = sd.mean(); sg_d = sd.std()
-ax1.plot(sd.index, sd.values, color=C["azul2"], linewidth=0.9)
-ax1.axhline(mu_d, linestyle="--", color=C["cinza"], linewidth=1,
-            label=f"mu={mu_d:.4f}")
-ax1.fill_between(sd.index, mu_d+2*sg_d, sd.values,
-                 where=(sd.values>=mu_d+2*sg_d), alpha=0.2, color=C["verm"])
-ax1.fill_between(sd.index, mu_d-2*sg_d, sd.values,
-                 where=(sd.values<=mu_d-2*sg_d), alpha=0.2, color=C["verde"])
-ax1.set_ylabel("Spread (log)"); ax1.legend(fontsize=9)
-ax1.set_title("Spread bruto")
-ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-ax1.xaxis.set_major_locator(mdates.YearLocator())
-
-ax2 = fig.add_subplot(gs[1])
-ax2.plot(zd.index, zd.values, color=C["azul"], linewidth=0.9, alpha=0.9)
-for lvl, col, ls in [(2,C["verm"],"--"),(-2,C["verde"],"--"),
-                      (3,C["verm"],":"  ),(-3,C["verde"],":"),
-                      (0,C["cinza"],"-")]:
-    ax2.axhline(lvl, linestyle=ls, color=col,
-                linewidth=1.2 if abs(lvl)<=2 else 0.9)
-ax2.fill_between(zd.index, 2,  zd.values, where=(zd.values>=2),
-                 alpha=0.2, color=C["verm"])
-ax2.fill_between(zd.index, -2, zd.values, where=(zd.values<=-2),
-                 alpha=0.2, color=C["verde"])
-nl = (zd<=-2).sum(); ns = (zd>=2).sum()
-ax2.set_ylabel("Z-Score"); ax2.set_ylim(-5, 5)
-ax2.set_title(f"Z-Score completo — LONG: {nl}d | SHORT: {ns}d | Neutro: {len(zd)-nl-ns}d")
-ax2.text(zd.index[-1], 2.1,  "+2s (SHORT)", color=C["verm"],  fontsize=8)
-ax2.text(zd.index[-1], -2.4, "-2s (LONG)",  color=C["verde"], fontsize=8)
-ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-ax2.xaxis.set_major_locator(mdates.YearLocator())
-
-ax3 = fig.add_subplot(gs[2])
-zr = zd[zd.index >= pd.Timestamp("2024-01-01")]
-ax3.plot(zr.index, zr.values, color=C["azul"], linewidth=1.2)
-for lvl, col, ls in [(2,C["verm"],"--"),(-2,C["verde"],"--"),(0,C["cinza"],"-")]:
-    ax3.axhline(lvl, linestyle=ls, color=col, linewidth=1.2)
-ax3.fill_between(zr.index, 2,  zr.values, where=(zr.values>=2),  alpha=0.25, color=C["verm"])
-ax3.fill_between(zr.index, -2, zr.values, where=(zr.values<=-2), alpha=0.25, color=C["verde"])
-ax3.set_ylabel("Z-Score"); ax3.set_ylim(-4, 4)
-ax3.set_title(f"Detalhe 2024-atual  |  Z atual = {zd.iloc[-1]:+.2f}  ({zd.index[-1].date()})")
-ax3.xaxis.set_major_formatter(mdates.DateFormatter("%b/%Y"))
-ax3.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
-
-plt.savefig(os.path.join(CHARTS_DIR, "08_par_destaque.png"),
-            dpi=150, bbox_inches="tight")
-plt.close(fig)
-print("      08_par_destaque.png")
-
-
-# G9: sinais ativos ao longo do tempo
-sl = (z_wide <= -2).sum(axis=1)
-ss = (z_wide >=  2).sum(axis=1)
-st = sl + ss
-sm_l = sl.resample("ME").mean()
-sm_s = ss.resample("ME").mean()
-sm_t = st.resample("ME").mean()
-
-fig, axes = plt.subplots(2, 1, figsize=(15, 8), sharex=True)
-fig.suptitle("Sinais Ativos (|Z| >= 2) ao Longo do Tempo",
-             fontsize=13, fontweight="bold")
-
-ax = axes[0]
-ax.fill_between(sm_t.index, sm_t.values, alpha=0.5, color=C["laran"])
-ax.plot(sm_t.index, sm_t.values, color=C["laran"], linewidth=1.5)
-ax.axhline(sm_t.mean(), linestyle="--", color=C["azul"], linewidth=1.2,
-           label=f"Media: {sm_t.mean():.1f} pares/mes")
-ax.set_title("Total de Pares com Sinal Ativo — Media Mensal")
-ax.set_ylabel("N de pares"); ax.legend()
-
-ax2 = axes[1]
-ax2.fill_between(sm_l.index, sm_l.values, alpha=0.5, color=C["verde"],
-                 label="LONG (Z <= -2)")
-ax2.fill_between(sm_s.index, sm_s.values, alpha=0.5, color=C["verm"],
-                 label="SHORT (Z >= +2)")
-ax2.plot(sm_l.index, sm_l.values, color=C["verde"], linewidth=1.2)
-ax2.plot(sm_s.index, sm_s.values, color=C["verm"],  linewidth=1.2)
-ax2.set_title("LONG vs SHORT — Media Mensal")
-ax2.set_ylabel("N de pares"); ax2.legend()
-ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-ax2.xaxis.set_major_locator(mdates.YearLocator())
-
-plt.tight_layout()
-salvar(fig, "09_sinais_temporais.png")
-
-
-# G10: snapshot atual dos z-scores
-ultimo_z = z_wide.iloc[-1].dropna().sort_values()
-nl_now   = (ultimo_z <= -2).sum()
-ns_now   = (ultimo_z >=  2).sum()
-data_ref = z_wide.index[-1].strftime("%d/%m/%Y")
-
-fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-fig.suptitle(f"Snapshot de Z-Scores — {data_ref}",
-             fontsize=13, fontweight="bold")
-
-ax = axes[0]
-cbs_snap = [C["verm"] if z >= 2 else C["verde"] if z <= -2 else C["cinza"]
-            for z in ultimo_z.values]
-ax.bar(range(len(ultimo_z)), ultimo_z.values,
-       color=cbs_snap, edgecolor="none", width=1.0)
-ax.axhline( 2, linestyle="--", color=C["verm"],  linewidth=1.2,
-            label="+2s (SHORT)")
-ax.axhline(-2, linestyle="--", color=C["verde"], linewidth=1.2,
-            label="-2s (LONG)")
-ax.axhline( 0, linestyle="-",  color=C["cinza"], linewidth=0.7)
-ax.set_title(f"Todos os {len(ultimo_z)} pares ordenados\n"
-             f"SHORT: {ns_now} | Neutro: {len(ultimo_z)-nl_now-ns_now} | LONG: {nl_now}")
-ax.set_xlabel("Pares (ordenados por z-score)")
-ax.set_ylabel("Z-Score"); ax.legend()
-
-ax2 = axes[1]
-ax2.hist(ultimo_z.values, bins=20, color=C["azul2"], edgecolor="white")
-ax2.axvline( 2, linestyle="--", color=C["verm"],  linewidth=1.5, label="+2s")
-ax2.axvline(-2, linestyle="--", color=C["verde"], linewidth=1.5, label="-2s")
-ax2.axvline( 0, linestyle="-",  color=C["cinza"], linewidth=0.8)
-ax2.set_title("Distribuicao dos Z-Scores Atuais")
-ax2.set_xlabel("Z-Score"); ax2.set_ylabel("Frequencia"); ax2.legend()
-
-plt.tight_layout()
-salvar(fig, "10_snapshot_zscores.png")
-
-
-# G11: heatmap pares × anos
-pares_df["Par"] = pares_df["Ativo_A"] + "_" + pares_df["Ativo_B"]
-top_hm = freq_pares.head(30).copy()
-top_hm["Par"] = top_hm["Ativo_A"] + "_" + top_hm["Ativo_B"]
-
-hm_data  = pares_df[pares_df["Par"].isin(top_hm["Par"].values)]
-pivot_hm = hm_data.pivot_table(index="Par", columns="Ano",
-                                values="P_Value", aggfunc="min")
-pivot_hm = pivot_hm.reindex(
-    [p for p in top_hm["Par"].tolist() if p in pivot_hm.index])
-pivot_hm.index = [p.replace("_", " x ") for p in pivot_hm.index]
-
-fig, ax = plt.subplots(figsize=(14, max(6, len(pivot_hm)*0.4)))
-im = ax.imshow(pivot_hm.values, aspect="auto", cmap="RdYlGn_r",
-               vmin=0, vmax=PVALUE_MAX,
-               extent=[-0.5, pivot_hm.shape[1]-0.5,
-                        pivot_hm.shape[0]-0.5, -0.5])
-plt.colorbar(im, ax=ax, label="P-value ADF (verde = forte)")
-ax.set_xticks(range(len(pivot_hm.columns)))
-ax.set_xticklabels(pivot_hm.columns.astype(str), rotation=45)
-ax.set_yticks(range(len(pivot_hm.index)))
-ax.set_yticklabels(pivot_hm.index, fontsize=9)
-ax.set_title(f"Heatmap — Top {len(pivot_hm)} Pares Mais Frequentes\n"
-             "Verde = cointegrado no ano | Branco = nao apareceu",
-             fontweight="bold")
-ax.set_xlabel("Ano de Formacao")
-
-for i in range(pivot_hm.shape[0]):
-    for j in range(pivot_hm.shape[1]):
-        val = pivot_hm.iloc[i, j]
-        if not np.isnan(val):
-            ax.text(j, i, f"{val:.3f}", ha="center", va="center",
-                    fontsize=6.5,
-                    color="white" if val < 0.02 else "black")
-
-plt.tight_layout()
-salvar(fig, "11_heatmap_pares.png")
-
-
-# G12: diagrama do pipeline
-fig, ax = plt.subplots(figsize=(15, 7))
-ax.set_xlim(0, 14); ax.set_ylim(0, 8); ax.axis("off")
-
-fases = [
-    (1.0, 5.8, "DADOS BRUTOS",
-     f"Economatica/B3\n{len(df_raw):,.0f} linhas\n{ANO_INICIO}-{ANO_FIM}\n{df_raw['Ativo'].nunique()} ativos",
-     C["cinza"]),
-    (3.6, 5.8, "LIMPEZA",
-     "Remove NaN\nForward fill (3d)\nConversao float64\nSufixo <XBSP>", C["azul"]),
-    (6.2, 5.8, "TOP 100 / ANO",
-     f"Por janela anual\nFiltro {int(MIN_PREGOES*100)}% pregoes\n{len(anos)} janelas\n4.950 pares/janela",
-     C["azul2"]),
-    (8.8, 5.8, "PARES / ANO",
-     f"Corr >= {CORR_MIN}\nEngle-Granger ADF\np < {PVALUE_MAX}\n{freq_pares.shape[0]} pares unicos",
-     C["roxo"]),
-    (11.4, 5.8, "SPREAD & Z",
-     f"OLS log-precos\nSpread = residuo\nZ = (s-mu)/sigma\n{len(zscore_global)} series diarias",
-     C["verde"]),
-]
-for x, y, titulo, corpo, cor in fases:
-    rect = mpatches.FancyBboxPatch(
-        (x-1.05, y-1.15), 2.0, 2.1,
-        boxstyle="round,pad=0.07",
-        facecolor=cor, edgecolor="white", linewidth=2.0, alpha=0.90, zorder=3)
-    ax.add_patch(rect)
-    ax.text(x, y+0.75, titulo, ha="center", va="center",
-            fontsize=8.5, fontweight="bold", color="white", zorder=4)
-    ax.text(x, y-0.2,  corpo,  ha="center", va="center",
-            fontsize=7.5, color="white", alpha=0.95, zorder=4)
-for xa, xb in [(2.05,2.55),(4.65,5.15),(7.25,7.75),(9.85,10.35)]:
-    ax.annotate("", xy=(xb, 5.8), xytext=(xa, 5.8),
-                arrowprops=dict(arrowstyle="-|>", color=C["azul2"],
-                                lw=2.0, mutation_scale=16), zorder=5)
-
-ax.text(7.0, 7.3, "FASES 1 E 2 CONCLUIDAS", ha="center", fontsize=11,
-        fontweight="bold", color=C["verde"],
-        bbox=dict(boxstyle="round,pad=0.4", facecolor="#e8f5e9",
-                  edgecolor=C["verde"], linewidth=1.5))
-
-proximos = [
-    (3.5, 2.5, "BACKTESTING",
-     "Simular sinais\nSharpe / Drawdown\nRetorno por par/ano"),
-    (7.0, 2.5, "CALIBRACAO",
-     "Z: 1.5 / 2.0 / 2.5\nStop |Z|>3 e t>30d\nOtimizar por janela"),
-    (10.5, 2.5, "MONITORAMENTO",
-     "Z-score diario\nAlertas de entrada\nDashboard live"),
-]
-for x, y, titulo, corpo in proximos:
-    rect = mpatches.FancyBboxPatch(
-        (x-1.5, y-0.9), 2.9, 1.7,
-        boxstyle="round,pad=0.07",
-        facecolor=C["laran"], edgecolor="white", linewidth=1.5, alpha=0.80, zorder=3)
-    ax.add_patch(rect)
-    ax.text(x, y+0.58, titulo, ha="center", fontsize=8.5,
-            fontweight="bold", color="white", zorder=4)
-    ax.text(x, y-0.2,  corpo,  ha="center", fontsize=7.5,
-            color="white", alpha=0.95, zorder=4)
-
-ax.text(7.0, 4.2, "PROXIMAS ETAPAS", ha="center", fontsize=10,
-        fontweight="bold", color=C["laran"])
-ax.set_title(f"Pipeline Completo — Pairs Trading B3 ({ANO_INICIO}-{ANO_FIM})",
-             fontsize=14, fontweight="bold", pad=18, color=C["azul"])
-plt.tight_layout()
-salvar(fig, "12_pipeline.png")
-
-
-# Resumo final
-
-print()
+    print("      08_par_destaque_kalman.png")
+
+    # G9 — sinais ativos ao longo do tempo
+    if not z_wide.empty:
+        sl   = (z_wide <= -2).sum(axis=1)
+        ss   = (z_wide >= 2).sum(axis=1)
+        sm_l = sl.resample("ME").mean()
+        sm_s = ss.resample("ME").mean()
+        sm_t = (sl + ss).resample("ME").mean()
+        fig, axes = plt.subplots(2, 1, figsize=(15, 8), sharex=True)
+        fig.suptitle("Sinais Ativos Kalman (|Z| ≥ 2) ao Longo do Tempo",
+                     fontsize=13, fontweight="bold")
+        axes[0].fill_between(sm_t.index, sm_t.values,
+                             alpha=0.5, color=C["laran"])
+        axes[0].plot(sm_t.index, sm_t.values,
+                     color=C["laran"], linewidth=1.5)
+        axes[0].axhline(sm_t.mean(), linestyle="--", color=C["azul"],
+                        linewidth=1.2,
+                        label=f"Média: {sm_t.mean():.1f}/mês")
+        axes[0].set_ylabel("N pares"); axes[0].legend()
+        axes[0].set_title("Total Sinais Ativos (Kalman Z-Score)")
+        axes[1].fill_between(sm_l.index, sm_l.values,
+                             alpha=0.5, color=C["verde"], label="LONG (Z≤-2)")
+        axes[1].fill_between(sm_s.index, sm_s.values,
+                             alpha=0.5, color=C["verm"],  label="SHORT (Z≥+2)")
+        axes[1].plot(sm_l.index, sm_l.values, color=C["verde"], linewidth=1.2)
+        axes[1].plot(sm_s.index, sm_s.values, color=C["verm"],  linewidth=1.2)
+        axes[1].set_ylabel("N pares"); axes[1].legend()
+        axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        axes[1].xaxis.set_major_locator(mdates.YearLocator())
+        plt.tight_layout()
+        _salvar(fig, "09_sinais_temporais.png")
+
+    # G10 — snapshot atual
+    if not z_wide.empty:
+        ultimo_z = z_wide.iloc[-1].dropna().sort_values()
+        nl_now   = (ultimo_z <= -2).sum()
+        ns_now   = (ultimo_z >= 2).sum()
+        data_ref = z_wide.index[-1].strftime("%d/%m/%Y")
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        fig.suptitle(f"Snapshot Kalman Z-Scores — {data_ref}",
+                     fontsize=13, fontweight="bold")
+        cbs_snap = [C["verm"] if z >= 2 else C["verde"] if z <= -2
+                    else C["cinza"] for z in ultimo_z.values]
+        axes[0].bar(range(len(ultimo_z)), ultimo_z.values,
+                    color=cbs_snap, edgecolor="none", width=1.0)
+        axes[0].axhline(2,  linestyle="--", color=C["verm"],
+                        linewidth=1.2, label="+2σ (SHORT)")
+        axes[0].axhline(-2, linestyle="--", color=C["verde"],
+                        linewidth=1.2, label="-2σ (LONG)")
+        axes[0].axhline(0,  linestyle="-",  color=C["cinza"], linewidth=0.7)
+        axes[0].set_title(
+            f"{len(ultimo_z)} pares | SHORT:{ns_now}  LONG:{nl_now}  "
+            f"Neutro:{len(ultimo_z)-nl_now-ns_now}")
+        axes[0].set_xlabel("Pares (ordenados por z-score Kalman)")
+        axes[0].set_ylabel("Z-Score"); axes[0].legend()
+        axes[1].hist(ultimo_z.values, bins=20,
+                     color=C["azul2"], edgecolor="white")
+        axes[1].axvline(2,  linestyle="--", color=C["verm"],
+                        linewidth=1.5, label="+2σ")
+        axes[1].axvline(-2, linestyle="--", color=C["verde"],
+                        linewidth=1.5, label="-2σ")
+        axes[1].axvline(0,  linestyle="-",  color=C["cinza"], linewidth=0.8)
+        axes[1].set_title("Distribuição Z-Scores Kalman Atuais")
+        axes[1].legend()
+        plt.tight_layout()
+        _salvar(fig, "10_snapshot_zscores.png")
+
+    # G11 — heatmap pares × ano
+    if not pares_df.empty:
+        pares_df["Par"] = pares_df["Ativo_A"] + "_" + pares_df["Ativo_B"]
+        top_hm = freq_pares.head(25).copy()
+        top_hm["Par"] = top_hm["Ativo_A"] + "_" + top_hm["Ativo_B"]
+        hm_data  = pares_df[pares_df["Par"].isin(top_hm["Par"].values)]
+        pivot_hm = hm_data.pivot_table(index="Par", columns="Ano",
+                                       values="P_Value", aggfunc="min")
+        pivot_hm = pivot_hm.reindex(
+            [p for p in top_hm["Par"].tolist() if p in pivot_hm.index])
+        pivot_hm.index = [p.replace("_", " × ") for p in pivot_hm.index]
+        fig, ax = plt.subplots(figsize=(14, max(6, len(pivot_hm) * 0.4)))
+        im = ax.imshow(pivot_hm.values, aspect="auto", cmap="RdYlGn_r",
+                       vmin=0, vmax=PVALUE_MAX,
+                       extent=[-0.5, pivot_hm.shape[1] - 0.5,
+                                pivot_hm.shape[0] - 0.5, -0.5])
+        plt.colorbar(im, ax=ax, label="P-value mín. do ano")
+        ax.set_xticks(range(len(pivot_hm.columns)))
+        ax.set_xticklabels(pivot_hm.columns.astype(str), rotation=45)
+        ax.set_yticks(range(len(pivot_hm.index)))
+        ax.set_yticklabels(pivot_hm.index, fontsize=9)
+        ax.set_title(f"Heatmap — Top {len(pivot_hm)} Pares Mais Frequentes",
+                     fontweight="bold")
+        ax.set_xlabel("Ano")
+        for i in range(pivot_hm.shape[0]):
+            for j in range(pivot_hm.shape[1]):
+                val = pivot_hm.iloc[i, j]
+                if not np.isnan(val):
+                    ax.text(j, i, f"{val:.3f}", ha="center", va="center",
+                            fontsize=6.5,
+                            color="white" if val < 0.02 else "black")
+        plt.tight_layout()
+        _salvar(fig, "11_heatmap_pares.png")
+
+    # G12 — setores
+    if "Setor_A" in pares_df.columns and pares_df["Setor_A"].notna().any():
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        fig.suptitle("Distribuição por Setor Econômico",
+                     fontsize=13, fontweight="bold")
+        msm_df = pares_df[pares_df["Mesmo_Setor"] == True]
+        if not msm_df.empty and msm_df["Setor_A"].notna().any():
+            cnt = msm_df["Setor_A"].value_counts().head(10)
+            axes[0].pie(cnt.values, labels=cnt.index,
+                        autopct="%1.0f%%", startangle=90,
+                        colors=plt.cm.Set3.colors[:len(cnt)])
+            axes[0].set_title(
+                f"Pares Mesmo Setor ({msm_df.shape[0]} pares-janela)")
+        todos_set = pd.concat([
+            pares_df[["Setor_A","Ano"]].rename(columns={"Setor_A":"Setor"}),
+            pares_df[["Setor_B","Ano"]].rename(columns={"Setor_B":"Setor"}),
+        ]).dropna(subset=["Setor"])
+        todos_set = todos_set[todos_set["Setor"] != "Outros"]
+        pivot_set = todos_set.groupby(["Ano","Setor"]).size().unstack(fill_value=0)
+        pivot_set.plot(kind="bar", ax=axes[1], colormap="Set3",
+                       edgecolor="white", linewidth=0.5)
+        axes[1].set_title("Participação Setorial × Ano")
+        axes[1].set_xlabel("Ano"); axes[1].set_ylabel("N ativos em pares")
+        axes[1].legend(title="Setor", fontsize=7, ncol=2)
+        plt.setp(axes[1].xaxis.get_majorticklabels(), rotation=45, ha="right")
+        plt.tight_layout()
+        _salvar(fig, "12_setores.png")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  RESUMO FINAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+if not z_wide.empty:
+    ult_z = z_wide.iloc[-1].dropna().sort_values()
+    nl_s  = (ult_z <= -2).sum()
+    ns_s  = (ult_z >= 2).sum()
+else:
+    ult_z = pd.Series(dtype=float)
+    nl_s = ns_s = 0
+
+print(f"\n{SEP}")
+print("RESUMO FINAL — Kalman Filter")
 print(SEP)
-print("RESUMO FINAL")
-print(SEP)
-print(f"\n  Periodo    : {ANO_INICIO} a {ANO_FIM} ({len(anos)} janelas anuais)")
-print(f"  Ativos/ano : top {TOP_N} por volume financeiro")
-print(f"  Corr. min  : |rho| >= {CORR_MIN}")
-print(f"  Criterio   : p-value ADF < {PVALUE_MAX}")
-print()
-print("  JANELAS:")
-print("  " + resumo_df[["Ano","N_Ativos","Candidatos_Corr",
-                          "Pares_Cointegrados","Dias_Pregao",
-                          "Top1","Top2","Top3"]].to_string(index=False)
-                                                .replace("\n", "\n  "))
+print(f"\n  Período   : {ANO_INICIO}–{ANO_FIM}")
+print(f"  Janelas   : {len(resumo_df)} mensais de {JANELA_FORMACAO} pregões")
+print(f"  Kalman    : δ={KALMAN_DELTA:.0e}  warm={KALMAN_N_WARM}  "
+      f"RAPIDO={'sim' if RAPIDO else 'não'}")
+print(f"\n  Totais    : {len(pares_df)} pares-janela | "
+      f"{len(freq_pares)} únicos | "
+      f"{len(zscore_global)} séries z-score Kalman")
 
 print(f"\n  PARES MAIS FREQUENTES (top 10):")
-print("  " + freq_pares.head(10)[["Ativo_A","Ativo_B",
-                                   "N_Anos","P_Value_Min","Corr_Med"]]
-                        .to_string(index=False)
-                        .replace("\n", "\n  "))
+print("  " + freq_pares.head(10)[
+    ["Ativo_A","Ativo_B","N_Janelas","P_Value_Min",
+     "Beta_Kal_Medio","Beta_Kal_Std","Mesmo_Setor","Setor_A"]]
+    .to_string(index=False).replace("\n", "\n  "))
 
 print(f"\n  PARES MAIS FORTES (menor p-value | top 10):")
-print("  " + melhores.head(10)[["Ativo_A","Ativo_B","Ano",
-                                  "Correlacao","P_Value","Beta","Spread_Sigma"]]
-                      .to_string(index=False)
-                      .replace("\n", "\n  "))
+print("  " + melhores.head(10)[
+    ["Ativo_A","Ativo_B","P_Value","Correlacao",
+     "Beta_Kal_Final","Beta_Kal_Std","Setor_A","Setor_B"]]
+    .to_string(index=False).replace("\n", "\n  "))
 
-alertas = ultimo_z[ultimo_z.abs() >= 2].sort_values()
-print(f"\n  SNAPSHOT ATUAL ({z_wide.index[-1].date()}) — "
-      f"LONG: {nl_now} | SHORT: {ns_now} | Neutro: {len(ultimo_z)-nl_now-ns_now}")
-if len(alertas) > 0:
-    print()
-    for par_n, zv in alertas.items():
-        partes = par_n.split("__")
-        direcao = "LONG " if zv <= 0 else "SHORT"
-        print(f"    {direcao}  {partes[0]:8s} x {partes[1]:8s}  Z = {zv:+.2f}")
+if len(ult_z) > 0:
+    data_ult = z_wide.index[-1].date()
+    print(f"\n  SNAPSHOT KALMAN ({data_ult}) — "
+          f"LONG:{nl_s} | SHORT:{ns_s} | "
+          f"Neutro:{len(ult_z)-nl_s-ns_s}")
+    alertas = ult_z[ult_z.abs() >= 2]
+    if len(alertas) > 0:
+        print()
+        for par_n, zv in alertas.items():
+            partes  = par_n.split("__")
+            direcao = "LONG " if zv <= 0 else "SHORT"
+            # busca beta atual se disponível
+            key = (partes[0], partes[1]) if partes[0] < partes[1] \
+                  else (partes[1], partes[0])
+            beta_now = zscore_global.get(key, {}).get("Beta_t")
+            beta_str = (f"  β={float(beta_now.iloc[-1]):.3f}"
+                        if beta_now is not None and len(beta_now) > 0
+                        else "")
+            print(f"    {direcao}  {partes[0]:8s} × {partes[1]:8s}"
+                  f"  Z={zv:+.2f}{beta_str}")
 
-print()
-print(SEP)
-print(f"  Graficos : {CHARTS_DIR}")
+print(f"\n  Gráficos : {CHARTS_DIR}")
 print(f"  CSVs     : {OUTPUT_DIR}")
-print(SEP)
-print()
+print(f"{SEP}\n")
