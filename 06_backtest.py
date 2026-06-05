@@ -624,17 +624,22 @@ if "Setor_A" in trades_df.columns and trades_df["Setor_A"].notna().any():
                   .reset_index().rename(columns={"Setor_A": "Setor"})
                   .sort_values("Sharpe", ascending=False))
 
-# PnL diário: média por par (para Sharpe) e soma total (para equity curve)
-retorno_diario = (trades_df.groupby("data_saida")["pnl_liquido"]
-                  .mean().rename("ret"))
-# equity curve = soma cumulativa do PnL diário (log-spread, não composto)
-equity_curve   = (trades_df.groupby("data_saida")["pnl_liquido"]
-                  .sum().cumsum())
+# Série diária completa: todos os pregões do período, zeros nos dias sem trades
+# (corrige Sharpe inflado que só usava dias com trades como denominador)
+_t_ini = trades_df["data_entrada"].min()
+_t_fim = trades_df["data_saida"].max()
+dias_completos = pd.DatetimeIndex([d for d in cal_list if _t_ini <= d <= _t_fim])
+
+pnl_por_dia    = (trades_df.groupby("data_saida")["pnl_liquido"]
+                  .sum().rename("ret"))
+retorno_diario = pnl_por_dia.reindex(dias_completos, fill_value=0.0)
+
+# equity curve = PnL acumulado sobre toda a série diária
+equity_curve   = retorno_diario.cumsum()
 sharpe_total   = (retorno_diario.mean() / retorno_diario.std() * np.sqrt(252)
                   if retorno_diario.std() > 0 else 0)
-# drawdown em unidades absolutas de log-spread (não faz sentido % aqui)
 dd_series      = equity_curve - equity_curve.cummax()
-max_dd         = dd_series.min()   # ex: -2.05 log-spread units
+max_dd         = dd_series.min()
 win_rate       = (trades_df["pnl_liquido"] > 0).mean()
 
 # CSVs
