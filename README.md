@@ -1,75 +1,241 @@
-# Aplicação da estratégia de Pairs Trading no contexto acionário brasileiro
+# Pairs Trading no Mercado Acionário Brasileiro
+### Estudo da aplicabilidade da estratégia com Filtro de Kalman
 
-## Contexto 
-### O que é Pairs Trading
+**FEA.dev** · Jayni Bitencourt Lima · Victor Braga · São Paulo, 2026
 
-Pairs trading é uma estratégia de arbitragem estatística que opera sobre a relação de preços entre dois ativos com vínculo econômico comprovado. A ideia central é simples: se dois ativos compartilham os mesmos fundamentos — mesmo setor, mesma cadeia produtiva, mesma empresa em classes diferentes — seus preços tendem a se mover juntos ao longo do tempo. Quando, por alguma razão momentânea, essa relação se rompe e os preços se afastam mais do que o histórico indica como normal, a estratégia aposta na convergência: compra-se o ativo que ficou "barato" e vende-se simultaneamente o ativo que ficou "caro", esperando que o equilíbrio se restabeleça.
+---
 
-Essa estrutura de operação — compra de um ativo e venda de outro ao mesmo tempo — é o que a torna *market-neutral*: o retorno não depende se o mercado sobe ou cai, mas exclusivamente de o spread entre os dois ativos voltar ao seu padrão histórico. Uma queda geral do mercado, por exemplo, afeta os dois ativos de forma semelhante e não compromete a operação.
+> **Pergunta central:** É possível construir uma estratégia quantitativa de pairs trading no mercado acionário brasileiro atualmente?
 
-O critério estatístico que sustenta a estratégia é a **cointegração**: dois ativos são cointegrados quando, apesar de cada preço individualmente ser imprevisível (seguindo um passeio aleatório), a diferença entre eles é estacionária — oscila em torno de uma média com variância estável. É essa propriedade que garante que o spread *tem* de voltar, no sentido estatístico, e que distingue pairs trading de uma aposta direcional.
+---
 
-A literatura (Gatev et al., 2006; Vidyamurthy, 2004) classifica os vínculos econômicos válidos em seis categorias:
+## Sumário
 
-(i) Mesma empresa, classes diferentes — ações ON e PN da mesma companhia compartilham o mesmo fluxo de caixa e diferem apenas em direitos políticos. Ex.: PETR3/PETR4, GGBR3/GGBR4.
+1. [O que é Pairs Trading](#1-o-que-é-pairs-trading)
+2. [Objetivo](#2-objetivo)
+3. [Metodologia](#3-metodologia)
+4. [Resultados do Backtest](#4-resultados-do-backtest)
+5. [Análise Crítica](#5-análise-crítica)
+6. [Estrutura do Repositório](#6-estrutura-do-repositório)
+7. [Referências](#7-referências)
 
-(ii) Holding e controlada — o valor da holding deriva da participação na controlada, com desconto historicamente estável. Ex.: BRAP4/VALE3, ITSA4/ITUB4.
+---
 
-(iii) Mesmo setor e modelo de negócio — concorrentes sujeitos aos mesmos drivers de demanda, custos e regulação. Ex.: ITUB4/BBDC4 (bancos), JBSS3/MRFG3 (frigoríficos), ASAI3/CRFB3 (atacarejo).
+## 1. O que é Pairs Trading
 
-(iv) Mesma cadeia produtiva — empresas em elos diferentes da mesma cadeia, expostas ao mesmo ciclo. Ex.: VALE3/CSNA3 (minério-aço), SUZB3/KLBN11 (papel-celulose).
+Pairs trading é uma estratégia de **arbitragem estatística** que opera sobre a relação de preços entre dois ativos com vínculo econômico comprovado. Quando essa relação se rompe temporariamente, a estratégia compra o ativo "barato" e vende o ativo "caro" simultaneamente, apostando na convergência posterior.
 
-(v) Fator macro comum — ativos cuja relação vem de exposição compartilhada a um driver externo (câmbio, juros, commodity). Ex.: exportadoras dolarizadas; empresas alavancadas sensíveis à Selic.
+Por operar **long e short ao mesmo tempo**, a estratégia é *market-neutral*: o retorno não depende da direção geral do mercado, mas apenas de o spread entre os dois ativos voltar ao padrão histórico.
 
-(vi) Arbitragem direta — mesmo ativo em mercados diferentes (ações ON na B3 vs. ADRs na NYSE).
+O critério estatístico que sustenta a estratégia é a **cointegração** (Engle & Granger, 1987): dois ativos são cointegrados quando, apesar de cada preço individualmente seguir um passeio aleatório, a diferença entre eles é **estacionária** — oscila em torno de uma média com variância estável.
 
-### Histórico
+### Vínculos econômicos válidos
 
-A estratégia de pairs trading foi formalizada por Gatev, Goetzmann e Rouwenhorst (2006), mas já era praticada por desks quantitativos desde os anos 1980, com destaque para o grupo de Morgan Stanley liderado por Nunzio Tartaglia. O arcabouço estatístico que sustenta a estratégia — a teoria da cointegração — foi desenvolvido por Engle e Granger (1987), rendendo-lhes o Prêmio Nobel de Economia em 2003.
+| Tipo | Exemplo B3 |
+|------|-----------|
+| Mesma empresa, classes diferentes (ON/PN) | PETR3 / PETR4 · GGBR3 / GGBR4 |
+| Holding e controlada | BRAP4 / VALE3 · ITSA4 / ITUB4 |
+| Mesmo setor e modelo de negócio | ITUB4 / BBDC4 · JBSS3 / MRFG3 |
+| Mesma cadeia produtiva | VALE3 / CSNA3 · SUZB3 / KLBN11 |
+| Fator macro comum | Exportadoras dolarizadas · Empresas sensíveis à Selic |
+| Arbitragem direta | Ação ON na B3 vs. ADR na NYSE |
 
-No Brasil, a pesquisa empírica sobre pairs trading na B3 ainda é escassa em comparação com o mercado americano. O ambiente brasileiro apresenta características que tornam o tema particularmente interessante: a existência estrutural de pares ON/PN da mesma empresa (ex.: PETR3/PETR4), a relação holding-controlada em grandes conglomerados (ex.: ITSA4/ITUB4), e setores com poucas empresas de capital aberto operando em condições quase idênticas (energia elétrica, bancos, frigoríficos). Esses fatores criam vínculos econômicos persistentes que são candidatos naturais à cointegração de longo prazo.
+---
 
-### Importância para o mercado financeiro
+## 2. Objetivo
 
-Pairs trading é relevante por múltiplas razões. Como estratégia *market-neutral*, gera retorno independente da direção geral do mercado, o que a torna atraente para gestão de risco em carteiras de ações. Do ponto de vista de eficiência de mercado, a estratégia contribui para acelerar a convergência de preços de ativos com fundamentos comuns, reduzindo distorções temporárias. Para analistas e gestores quantitativos, ela oferece um método rigoroso de formalizar relações econômicas já conhecidas informalmente — como o desconto estrutural de uma holding frente à sua controlada — e transformá-las em regras operacionais testáveis.
+Analisar se a estratégia de pairs trading pode ser aplicada ao mercado acionário brasileiro a partir de dados históricos da B3, transformando relações estatísticas em **regras quantitativas de entrada e saída** e avaliando a performance financeira por meio de backtest walk-forward.
 
-No contexto brasileiro, a estratégia também serve como instrumento de análise comparativa entre setores: diferentes segmentos da B3 apresentam graus distintos de cointegração, e mapear essas diferenças permite compreender melhor a estrutura de dependência do mercado acionário nacional.
+**Objetivos específicos:**
 
-## Objetivo geral 
-Analisar se a estratégia de pairs trading pode ser aplicada ao mercado acionário brasileiro a partir de dados históricos da B3. A estratégia consiste em identificar ações que se moveram juntas no passado e verificar se, quando esses pares apresentam um afastamento anormal entre seus preços, o spread tende a retornar ao seu padrão histórico. A partir disso, o estudo busca avaliar se essa normalização pode gerar oportunidade de lucro por meio da compra da ação relativamente barata e da venda da ação relativamente cara, apostando na convergência posterior. Por fim, pretende-se testar se o comportamento histórico dos pares pode ser transformado em uma regra quantitativa de decisão para monitorar futuras oportunidades de entrada e saída no mercado brasileiro. 
+- Selecionar dinamicamente ativos líquidos da B3 em janelas móveis bienais
+- Identificar pares cointegrados combinando distância mínima + teste de Engle-Granger
+- Estimar dinamicamente o hedge ratio com **Filtro de Kalman**
+- Gerar sinais de operação a partir do z-score do spread dinâmico
+- Avaliar desempenho financeiro, risco e consistência temporal da estratégia
+- Comparar performance entre setores da B3
 
-## Objetivos específicos 
-1) Identificar pares estatisticamente semelhantes na B3
-2) Identificar a lógica econômica que relaciona esses ativos 
-3) Construir o spread e analisar a partir de qual z-score o desvio deixa de ser uma oscilação normal e passa a representar uma oportunidade de pairs trading
-4) Definir uma regra de entrada e saída da operação
-5) Medir o tempo e grau de normalização desse spread
-6) Avaliar o desempenho financeiro e o risco da estratégia
-7) Analisar a diferença do desempenho entre os setores da B3
-8) Construção de uma regra de monitoramento futuro. Quando um par validado atinge determinado nível de z-score, o modelo gera um sinal de entrada na operação, ou seja, indicação de compra e venda. Quando o spread retorna para perto da média, gera um sinal de saída da operação, ou seja, vender a ação que havia sido comprada e recomprar a ação que havia sido vendida para obter lucro com essa estratégia. 
+---
 
-## Metodologia
+## 3. Metodologia
 
-O estudo cobre o período de janeiro de 2015 a dezembro de 2025, utilizando dados históricos de preços ajustados da Economatica/B3. O pipeline foi implementado do zero em Python e executa as seguintes etapas, repetidas para cada janela anual:
+O projeto está organizado em **seis notebooks** que formam um pipeline sequencial:
 
-**1. Seleção do universo:** para cada ano, selecionam-se os 100 ativos com maior volume financeiro que tenham negociado em pelo menos 60% dos pregões disponíveis naquele período. Isso garante que o modelo opere sempre sobre ativos com liquidez real, incorporando naturalmente IPOs e excluindo papéis que perderam relevância ao longo do tempo.
+```
+Dados brutos (Economatica)
+        │
+        ▼
+[NB 01] Tratamento e limpeza
+        │  preços ajustados, padronização, formato Parquet
+        ▼
+[NB 02] Enriquecimento cadastral e setorial
+        │  id_papel (ISIN ou ticker), setor/subsetor/segmento
+        ▼
+[NB 03] Seleção dinâmica de ativos líquidos
+        │  janelas de 504 pregões (~2 anos), score de liquidez por percentil
+        ▼
+[NB 04] Formação dos pares
+        │  pré-filtro por distância mínima → teste de cointegração (p ≤ 5%)
+        │  top 20 pares por janela, ordenados por p-valor e distância
+        ▼
+[NB 05] Modelo com Filtro de Kalman
+        │  beta dinâmico, spread dinâmico, z-score adaptativo
+        │  sinais: LONG / SHORT / NEUTRO
+        ▼
+[NB 06] Backtest walk-forward bienal
+         métricas, curvas de PnL, drawdown, análise por setor/ciclo/par
+```
 
-**2. Pré-triagem por correlação:** calcula-se a correlação de Pearson entre os log-preços de todos os pares possíveis (4.950 combinações por janela). São mantidos apenas os pares com |ρ| ≥ 0,80. A correlação sobre log-preços é a métrica correta para pré-selecionar candidatos à cointegração, pois esta é uma propriedade dos níveis das séries e não dos retornos.
+### Regras do backtest
 
-**3. Teste de cointegração de Engle-Granger:** para cada par que passou no filtro de correlação, estima-se a regressão OLS log(A) = α + β·log(B) + ε e aplica-se o teste ADF sobre o resíduo. Pares com p-value ADF < 0,05 são considerados cointegrados — ou seja, apresentam spread estacionário que reverte à média.
+| Parâmetro | Valor |
+|-----------|-------|
+| Entrada | \|z\| ≥ 2,0 |
+| Saída por convergência | \|z\| ≤ 0,5 |
+| Stop por divergência | \|z\| ≥ 3,0 |
+| Stop por tempo | 30 pregões |
+| Custo operacional | 10 bps/lado → 20 bps round-trip |
 
-**4. Spread e z-score:** para cada par cointegrado, calcula-se o spread diário (Spread_t = log(A_t) − α − β·log(B_t)) e normaliza-se pelo histórico da janela de formação: Z_t = (Spread_t − μ) / σ. O z-score é o sinal operacional: |Z| ≥ 2 indica entrada, |Z| ≤ 0,5 indica saída, e |Z| ≥ 3 aciona o stop de divergência.
+### Walk-forward bienal
 
-A documentação técnica completa, incluindo decisões metodológicas detalhadas, justificativas de cada escolha e pseudocódigo do backtesting, está disponível em [`Documentação modelos e dados.md`](Documentação%20modelos%20e%20dados.md).
+```
+Ciclo 1:  Formação 2010–2011  →  Trading 2012–2013
+Ciclo 2:  Formação 2012–2013  →  Trading 2014–2015
+Ciclo 3:  Formação 2014–2015  →  Trading 2016–2017
+Ciclo 4:  Formação 2016–2017  →  Trading 2018–2019
+Ciclo 5:  Formação 2018–2019  →  Trading 2020–2021
+Ciclo 6:  Formação 2020–2021  →  Trading 2022–2023
+Ciclo 7:  Formação 2022–2023  →  Trading 2024–2025
+```
 
-## Resultados obtidos
+---
 
-O pipeline identificou **1.749 registros par-ano** e **1.559 pares únicos cointegrados** ao longo das 11 janelas anuais, de um total de 9.709 candidatos por correlação testados. A taxa de aprovação no teste ADF variou de 6% (2024) a 26% (2020), refletindo a maior ou menor coerência estrutural do mercado em cada período.
+## 4. Resultados do Backtest
 
-**Pares mais estáveis estruturalmente** (cointegrados em 3 ou mais janelas): PETR3×PETR4, ITSA4×ITUB4 e IGTA3×MULT3 figuram entre os mais persistentes, com p-values mínimos abaixo de 0,001. Esses pares possuem vínculos econômicos sólidos — mesma empresa em classes diferentes, ou relação holding-controlada — o que explica a estabilidade estatística ao longo do tempo.
+### Métricas consolidadas (2012–2025)
 
-**Efeitos de regime:** 2020 (COVID-19) registrou o maior número de pares cointegrados (313), resultado do choque sistêmico que comprimiu os ativos em movimentos conjuntos. Esse período requer atenção especial no backtesting, pois a cointegração observada pode refletir correlação de crise e não um vínculo estrutural de longo prazo. Em contraste, 2024 apresentou apenas 78 pares cointegrados, sinalizando um mercado mais disperso e com relações de equilíbrio mais difíceis de estabelecer.
+| Trades | Win Rate | Sharpe | MaxDD (log-spread) | Duração Média | Retorno a.a. |
+|--------|----------|--------|-------------------|---------------|--------------|
+| 1.047  | 53,9%    | 0,24   | −2,049            | 4,8 pregões   | +0,92%       |
 
-**Snapshot operacional:** no último pregão disponível (dezembro de 2025), 148 pares apresentavam z-score calculado; destes, 18 exibiam sinal ativo (|Z| ≥ 2), com 12 SHORT e 6 LONG. Os pares com maior z-score naquele momento estavam acima do limiar de stop (|Z| > 3), indicando divergência e não uma oportunidade de entrada.
+> Simulação monetária: R$ 1.000 iniciais → **R$ 1.136,38** (5% do capital por par, sem alavancagem, sem CDI do caixa não alocado).
 
-Os resultados detalhados por janela, ranking de pares e alertas operacionais estão documentados na seção 6 de [`Documentação modelos e dados.md`](Documentação%20modelos%20e%20dados.md).
+### Performance por ciclo bienal
+
+| Ciclo de trading | Sharpe | Win Rate | Resultado |
+|-----------------|--------|----------|-----------|
+| 2012–2013 | −0,007 | 63,6% | ⚪ Neutro |
+| 2014–2015 | 1,31   | 49,1% | 🟢 Positivo |
+| 2016–2017 | **1,87** | 65,0% | 🟢 Melhor ciclo |
+| 2018–2019 | 1,49   | 50,0% | 🟢 Positivo |
+| 2020–2021 | 0,32   | 54,0% | 🟢 Positivo |
+| 2022–2023 | −0,13  | 44,5% | 🔴 Negativo |
+| 2024–2025 | −1,64  | 46,6% | 🔴 Pior ciclo |
+
+### Top 5 pares por Sharpe (out-of-sample)
+
+| Par | Sharpe | Win Rate | Trades |
+|-----|--------|----------|--------|
+| AXIA3 × AXIA6   | 45,87 | 100% | 2  |
+| GRND3 × KROT11  | 35,82 | 100% | 2  |
+| VIVT3 × VIVT4   | 31,94 | 100% | 4  |
+| LAME4 × RENT3   | 25,28 | 100% | 3  |
+| BBDC3 × IGTA3   | 23,66 | 100% | 2  |
+
+### Razões de saída
+
+| Razão | Trades | % |
+|-------|--------|---|
+| Convergência (sinal funcionou) | 598 | 57,1% |
+| Stop por divergência (spread continuou afastando) | 435 | 41,5% |
+| Stop por tempo | 14 | 1,3% |
+
+### Performance por setor
+
+| Setor | Trades | Win Rate | Sharpe | PnL Total |
+|-------|--------|----------|--------|-----------|
+| Comunicações | 13 | 76,9% | 7,79 | +0,356 |
+| Financeiro | 235 | 57,0% | 1,15 | +1,904 |
+| Bens Industriais | 126 | 54,0% | 1,32 | +1,473 |
+| Materiais Básicos | 69 | 56,5% | 0,91 | +0,130 |
+| Consumo Não Cíclico | 11 | 45,5% | 0,65 | +0,033 |
+| Consumo Cíclico | 433 | 51,3% | −0,18 | −0,369 |
+| Utilidade Pública | 155 | 52,9% | −1,19 | −0,809 |
+
+---
+
+## 5. Análise Crítica
+
+### ✅ O que funcionou
+
+- Pares com **vínculos econômicos sólidos** (ON/PN, holding-controlada) foram os mais consistentes e com Sharpe individual muito elevado
+- Ciclos 2014–2019 entregaram **Sharpe > 1,0** em todos os períodos, validando a metodologia em condições de mercado favoráveis
+- O Filtro de Kalman adaptou o hedge ratio dinamicamente, capturando mudanças graduais na relação entre os ativos
+
+### ⚠️ Limitações identificadas
+
+**Instabilidade estrutural** — Cointegração estimada em janela histórica não é invariante. A taxa de 41,5% de stops por divergência indica que parte dos pares perdeu a propriedade de reversão no período de trading, especialmente pós-2022.
+
+**Viés de seleção** — A escolha dos top-20 pares por ranking favorece os pares que "mais pareciam" cointegrados no treino, sem garantia out-of-sample. O "efeito publicação" de Gatev et al. (2006) — queda da rentabilidade após divulgação da estratégia — pode estar em curso no Brasil à medida que estratégias quant se tornam mais prevalentes.
+
+**Custos e liquidez** — O modelo assume 20 bps flat por operação, sem modelar bid-ask real nem impacto de mercado. Para pares menos líquidos o custo efetivo pode ser substancialmente maior, especialmente em saídas por stop (quando o mercado tende a ser mais ilíquido).
+
+**Caudas pesadas** — 65% dos pares exibem curtose > 3; alguns ultrapassam 40. Modelos de risco gaussianos subestimam o risco real. Limites de posição baseados em VaR normal são inadequados.
+
+**Ausência de benchmark** — O retorno de +0,92% a.a. sobre o capital total parece modesto frente à Selic. A comparação justa incluiria CDI sobre os 95% não alocados + receita de aluguel da ponta short — ambos omitidos na simulação.
+
+### 🔧 Próximos passos sugeridos
+
+- Renovação contínua dos testes de cointegração **durante** o período de trading
+- Limiares de entrada/stop **adaptativos** por volatilidade realizada ou quantis empíricos
+- Teto de concentração por setor e por par
+- Dimensionamento de risco por CVaR histórico
+- Comparação formal com benchmarks (CDI, IBOVESPA, carteira 60/40)
+- Análise por clusters estatísticos e regimes de mercado
+
+---
+
+## 6. Estrutura do Repositório
+
+```
+.
+├── 01_tratar_dados_economatica_B3.ipynb   # Limpeza e padronização da base bruta
+├── 02_dado_economatica_B3_addsetores.ipynb # Enriquecimento cadastral e setorial
+├── 03_universo_ativos_líquidos.ipynb       # Seleção dinâmica de ativos líquidos
+├── 04_formação_pares.ipynb                 # Formação dos pares (distância + cointegração)
+├── 05_modelo.ipynb                         # Filtro de Kalman e geração de sinais
+├── 06_backtest.ipynb                       # Backtest e métricas de performance
+│
+├── backtest/
+│   ├── graficos/                           # 9 gráficos do backtest
+│   ├── metricas_ano.csv                    # Performance por ano
+│   ├── metricas_ciclo.csv                  # Performance por ciclo bienal
+│   ├── metricas_par.csv                    # Performance por par
+│   ├── metricas_setor.csv                  # Performance por setor
+│   ├── resumo_ciclos.csv                   # Resumo dos ciclos walk-forward
+│   ├── skewness_diagnostico.csv            # Diagnóstico estatístico dos z-scores
+│   └── trades.csv                          # Base completa de trades
+│
+├── liquidez_historica.parquet              # Universo líquido por janela mensal
+└── pares_top20_cointegracao.parquet        # Top 20 pares por janela de formação
+```
+
+---
+
+## 7. Referências
+
+ALEXANDER, C. Optimal hedging using cointegration. *Philosophical Transactions of the Royal Society of London A*, v. 357, n. 1758, p. 2039–2058, 1999.
+
+DICKEY, D. A.; FULLER, W. A. Distribution of the estimators for autoregressive time series with a unit root. *Journal of the American Statistical Association*, v. 74, n. 366a, p. 427–431, 1979.
+
+ENGLE, R. F.; GRANGER, C. W. J. Co-integration and error correction: representation, estimation, and testing. *Econometrica*, v. 55, n. 2, p. 251–276, 1987.
+
+GATEV, E.; GOETZMANN, W. N.; ROUWENHORST, K. G. Pairs trading: performance of a relative-value arbitrage rule. *Review of Financial Studies*, v. 19, n. 3, p. 797–827, 2006.
+
+HAMILTON, J. D. *Time Series Analysis*. Princeton: Princeton University Press, 1994.
+
+KALMAN, R. E. A new approach to linear filtering and prediction problems. *Journal of Basic Engineering*, v. 82, n. 1, p. 35–45, 1960.
+
+POLE, A. *Statistical Arbitrage: Algorithmic Trading Insights and Techniques*. Hoboken: Wiley, 2007.
+
+VIDYAMURTHY, G. *Pairs Trading: Quantitative Methods and Analysis*. Hoboken: Wiley, 2004.
