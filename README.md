@@ -1,13 +1,7 @@
 # Pairs Trading no Mercado Acionário Brasileiro
 ### Estudo da aplicabilidade da estratégia com Filtro de Kalman
 
-**FEA.dev** · Jayni Bitencourt Lima · Victor Braga · São Paulo, 2026
-
----
-
-> **Pergunta central:** É possível construir uma estratégia quantitativa de pairs trading no mercado acionário brasileiro atualmente?
-
----
+**FEA.dev** · Jayni Bitencourt Lima · Victor Braga · 
 
 ## Sumário
 
